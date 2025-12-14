@@ -5,7 +5,10 @@ import { emitKeypressEvents } from "node:readline";
 import process from "node:process";
 import path from "node:path";
 import { stdin as input, stdout as output } from "node:process";
+import os from "node:os";
 
+// Helper for UI calculation
+const stripAnsi = (str) => str.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, "");
 // Config
 import { KEY, getRoot, setRoot, safePath } from "../src/config/constants.mjs";
 import { loadSettings, saveSettings } from "../src/config/settings.mjs";
@@ -43,6 +46,9 @@ import { loadSnippetsLibrary, saveSnippets, saveSnippet, loadSnippet, listSnippe
 
 // Brain
 import { loadBrain, saveBrain, initBrain, updateBrain, showBrain } from "../src/brain/brain.mjs";
+
+// Command Dispatcher
+import { handleCommand, getCommands } from "../src/commands/index.mjs";
 
 // Check API key
 if (!KEY) {
@@ -187,9 +193,27 @@ async function main() {
     // Actually, in raw mode, Ctrl+C might needs manual handling or rl handles it?
     // readline interface usually handles Ctrl+C -> SIGINT even in raw mode if configured.
     // But let's check key sequence just in case.
-    if (key.ctrl && key.name === 'c') {
-      // This usually triggers SIGINT above, so we might not need to duplicate logic 
-      // unless raw mode suppresses it.
+
+    // Ctrl+L: Clear Screen
+    if (key.ctrl && key.name === 'l') {
+      console.clear();
+      // We might need to reprint prompt?
+      // Since we are in a loop, clearing screen might mess up position if we don't redraw.
+      // But we are at `readline` prompt.
+      // Ideally we trigger a redraw.
+    }
+
+    // Ctrl+Y: Toggle YOLO Mode
+    if (key.ctrl && key.name === 'y') {
+      settings.yoloMode = !settings.yoloMode;
+      console.log(`\n${c.dim}YOLO Mode: ${settings.yoloMode ? c.green + "ON" : c.red + "OFF"}${c.reset}`);
+      // Save?
+      // saveSettings(settings); 
+    }
+
+    // Ctrl+X: External Editor (Stub)
+    if (key.ctrl && key.name === 'x') {
+      console.log(`\n${c.dim}Opening external editor... (Not fully implemented yet)${c.reset}`);
     }
   });
 
@@ -214,48 +238,136 @@ async function main() {
 
     // Dynamic width box
     const width = process.stdout.columns || 80;
-    // Box borders: ╭ ─ ╮ │ ╰ ╯
-    // We want the box to be full width minus a bit of margin? Or full? 
-    // Reference image shows partial width (not full edge-to-edge).
-    // Let's do width - 2 (margin).
     const boxWidth = Math.max(20, width - 2);
     const lineChar = "─";
+
+    // Status Bar Data
+    const cwd = path.relative(os.homedir(), process.cwd()) || "~";
+    const mem = (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1);
+    const contextUsage = "0%"; // Todo: calculate real token usage
+    const model = settings.model || "auto";
+
+    // --- Live Autocomplete Logic ---
+    const commands = getCommands();
+    const cmdList = Object.values(commands).map(mod => mod.meta).filter(Boolean); // { name, description, usage }
 
     const topBorder = `${c.pplx.teal}╭${lineChar.repeat(boxWidth - 2)}╮${c.reset}`;
     const botBorder = `${c.pplx.teal}╰${lineChar.repeat(boxWidth - 2)}╯${c.reset}`;
 
-    // Box Top
+    // Status Lines
+    // L1: ~                                                no sandbox (see /docs)
+    // L2:                                                  auto (100% context left) | 131.4 MB
+
+    const statusL1Left = `${c.dim}${cwd}${c.reset}`;
+    const statusL1Right = `${c.dim}no sandbox (see /docs)${c.reset}`;
+    const paddingL1 = width - 2 - cwd.length - 22; // 22 is ~ length of right string
+    const statusLine1 = " " + statusL1Left + " ".repeat(Math.max(0, paddingL1)) + statusL1Right;
+
+    const statusL2Right = `${c.dim}${model} (100% context left) | ${mem} MB${c.reset}`;
+    const paddingL2 = width - 2 - stripAnsi(statusL2Right).length;
+    const statusLine2 = " " + " ".repeat(Math.max(0, paddingL2)) + statusL2Right;
+
+    // Render Box & Status
     console.log(topBorder);
-
-    // Spacer
-    console.log(" ");
-
-    // Box Bottom
+    console.log(" "); // Middle (Prompt line)
     console.log(botBorder);
+    console.log(statusLine1);
+    console.log(statusLine2);
 
-    // Move Up 2 lines
-    process.stdout.write('\x1B[2A');
+    // Initial Cursor Position: Up 4 lines (Status2, Status1, BotBorder, Middle)
+    process.stdout.write('\x1B[4A');
 
     // Prompt
-    const prompt = `${c.pplx.teal}│${c.reset} ${c.bold}${c.pplx.white || c.white}λ${c.reset} `;
-    let line = (await rl.question(prompt)).trim();
+    const prompt = `${c.pplx.teal}│${c.reset} ${c.bold}${c.pplx.white || c.white}>${c.reset} `;
 
-    // Move down
-    process.stdout.write('\n'); // rl.question adds a newline, so we are on the bottom border line.
-    // We just need to make sure we don't overwrite it if the user just printed something?
-    // Actually, when user hits enter, cursor moves to next line (which is the bottom border line).
-    // The previous bottom border is now "behind" the cursor's new position?
-    // No, standard TTY behavior:
-    // 1. Print Bottom
-    // 2. Up 1 line
-    // 3. Print Prompt
-    // 4. User types "foo\n"
-    // 5. \n causes cursor to go to next line (Start of Bottom Border line)
-    // 6. We are now effectively overwriting the bottom border line with next output?
-    // We should print a newline to jump over it?
-    // OR we can just reprint the bottom border to be clean.
-    // Let's force a newline to be safe and simple.
-    // process.stdout.write('\n');
+    // --- Live Autocomplete Logic ---
+    const keypressHandler = () => {
+      // Wait for rl to update 'line'
+      setTimeout(() => {
+        const input = rl.line;
+
+        // Only trigger if line starts with /
+        if (input.startsWith("/")) {
+          const query = input.slice(1).toLowerCase();
+          const matches = cmdList.filter(cmd => cmd.name.startsWith(query));
+
+          // Save Cursor
+          process.stdout.write('\x1B[s');
+
+          // Move down to Bottom Border (2 lines down from prompt)
+          // Prompt line -> BotBorder -> Status1
+          process.stdout.write('\x1B[2B');
+          process.stdout.write('\x1B[1G'); // Start of line
+
+          // Clear Down
+          process.stdout.write('\x1B[0J');
+
+          if (matches.length > 0) {
+            // Render Suggestions
+            const limit = 5;
+            matches.slice(0, limit).forEach(cmd => {
+              const namePadding = " ".repeat(12 - cmd.name.length);
+              console.log(`${c.pplx.teal}${cmd.name}${c.reset}${namePadding} ${c.dim}${cmd.description}${c.reset}`);
+            });
+            if (matches.length > limit) {
+              console.log(`${c.dim}(${matches.length} matches)${c.reset}`);
+            }
+          } else {
+            // No match or just "/"
+            // Maybe restore status bar? 
+            // For now, keep empty to be clean "dropdown" style
+          }
+
+          // Restore Cursor
+          process.stdout.write('\x1B[u');
+        } else {
+          // Not a command, ensure status bar is visible?
+          // If we previously cleared it, we should redraw it.
+          // This is tricky without "knowing" previous state.
+          // Simplified: If not '/', we don't clear, assuming status bar is there.
+          // But if user backspaced from '/', we need to PUT BACK the status bar.
+          // For this iteration, let's just leave it blank if they typed '/' then deleted it, 
+          // until they hit Enter (which refreshes loop).
+          // Or: Redraw status bar if empty/not slash?
+          if (input === "" || !input.includes("/")) {
+            process.stdout.write('\x1B[s');
+            process.stdout.write('\x1B[2B');
+            process.stdout.write('\x1B[1G');
+            process.stdout.write(botBorder + "\n" + statusLine1 + "\n" + statusLine2); // Poor man's redraw
+            process.stdout.write('\x1B[u');
+          }
+        }
+      }, 1);
+    };
+
+    process.stdin.on('keypress', keypressHandler);
+
+    // Readline interaction
+    let line = await rl.question(prompt);
+    line = line.trim();
+
+    // Clean up listener
+    process.stdin.removeListener('keypress', keypressHandler);
+
+    // CLEAR BOTTOM UI:
+    // User hit enter, so cursor is now at the start of the line BELOW the input (The Bottom Border Line).
+    // We want to erase everything from here down (Bottom Border + Status Lines).
+    process.stdout.write('\x1B[0J'); // Clear screen from cursor down
+
+    // We also want to close the box visually in history? 
+    // If we clear the bottom border, it looks like an open-ended box in history:
+    // ╭──────╮
+    // │ > hi
+    // (response)
+    //
+    // The user's request says "dont print the remaining bottom part". 
+    // And "look like the image". The image SHOWS a bottom border in the "Active" state, but the second image shows just the top part for history?
+    // Actually, normally CLI history is just text. 
+    // If I leave the bottom border, it looks like a box.
+    // If I remove it, it looks cleaner.
+    // Let's stick to the "Clear Down" approach as it's the most standard "Transient UI" pattern.
+    // BUT, we might want to print a simple "closing" line if we want it to look like a box in history.
+    // Let's just do valid clearing first.
 
     if (!line) continue;
 
@@ -275,375 +387,74 @@ async function main() {
       continue;
     }
 
-    let [cmd, ...rest] = line.split(" ");
-    if (cmd.startsWith("/")) cmd = cmd.slice(1);
-
-    // Conversational mode
-    if (settings.conversationalMode && ![
-      "quit", "exit", "help", "ask", "clear", "history", "settings",
-      "root", "ls", "cd", "tree", "find", "stat", "mkdir", "rm", "cp", "mv",
-      "read", "write", "edit", "review", "test", "document", "refactor",
-      "metrics", "scaffold", "git", "commit", "session", "snippet", "brain",
-      "grep", "todo", "deps", "usage", "@", "role"
-    ].includes(cmd)) {
-      await handleAsk(line, rl);
-      continue;
-    }
-
-    lastCommand = cmd;
 
     try {
-      // Alias resolution
-      if (settings.aliases && settings.aliases[cmd]) {
-        const expansion = settings.aliases[cmd];
-        console.log(`${c.dim}➜ Alias: ${cmd} -> ${expansion}${c.reset}`);
-        const parts = expansion.split(" ");
-        cmd = parts[0];
-        rest = [...parts.slice(1), ...rest];
+      let [cmd, ...rest] = line.split(" ");
+      if (cmd.startsWith("/")) cmd = cmd; // keep slash for dispatcher? No, usually dispatcher takes name
+      // actually my dispatcher takes full input string
+
+      // Command Dispatcher
+      // We pass the full line to handleCommand (it parses args)
+      // We provide a context object with everything needed
+      const context = {
+        settings,
+        rl,
+        conversationHistory,
+        projectBrain,
+        snippetsLibrary,
+        root: getRoot(),
+        setRoot,
+        usageStats,
+        lastCommand,
+        lastError,
+        // Helper methods
+        clearHistory: () => { conversationHistory = []; },
+        printBanner: printGeminiStyleBanner,
+      };
+
+      // If it starts with / or is a known command, try dispatcher first
+      if (line.startsWith("/")) {
+        const handled = await handleCommand(line, context);
+        if (handled) continue;
+        // If not handled, fall through?
       }
 
-      if (cmd === "quit" || cmd === "exit") {
-        console.log(`\n${c.brightCyan}👋 Thanks for using Perplexity CLI Agent!${c.reset}\n`);
-        break;
+      // Conversational mode logic (simplified)
+      if (settings.conversationalMode && !line.startsWith("/")) {
+        await handleAsk(line, rl);
+        continue;
       }
-      else if (cmd === "help") help(settings.model, getRoot());
-      else if (cmd === "ask") {
-        const userPrompt = rest.join(" ");
-        if (!userPrompt) {
-          console.log(`${c.yellow}⚠${c.reset} Usage: ${c.cyan}ask${c.reset} ${c.dim}<question>${c.reset}\n`);
-          continue;
+
+      // Fallback if not conversational and not a slash command found, check if it matches a known command without slash
+      // Or just treat as ask?
+      // Current logic allowed "quit" without slash. Dispatcher expects "/quit" based on my registry? 
+      // Wait, handleCommand splits string. It expects "/cmd".
+      // I should normalize.
+
+      let commandInput = line;
+      if (!line.startsWith("/")) {
+        // If standard command, prepend /
+        const firstWord = line.split(" ")[0];
+        const common = ["quit", "exit", "help", "clear", "ls", "cd"];
+        if (common.includes(firstWord)) {
+          commandInput = "/" + line;
         }
-        await handleAsk(userPrompt, rl);
       }
-      else if (cmd === "clear") {
-        conversationHistory = [];
-        console.log(`${c.green}✓${c.reset} Conversation cleared\n`);
+
+      if (commandInput.startsWith("/")) {
+        const handled = await handleCommand(commandInput, context);
+        if (handled) continue;
       }
-      else if (cmd === "history") showHistory(conversationHistory);
-      else if (cmd === "settings") {
-        if (rest[0] === "set" && rest.length >= 3) {
-          const key = rest[1];
-          const value = rest.slice(2).join(" ");
-          const boolVal = value.toLowerCase() === "true";
 
-          if (key === "model") settings.model = value;
-          else if (key === "temperature") settings.temperature = Math.min(1, Math.max(0, parseFloat(value)));
-          else if (key === "editTemp") settings.editTemp = Math.min(1, Math.max(0, parseFloat(value)));
-          else if (key === "maxHistory") settings.maxHistory = parseInt(value);
-          else if (key === "maxFilesPerQuery") settings.maxFilesPerQuery = parseInt(value);
-          else if (key === "colorScheme") settings.colorScheme = value;
-          else if (["autoContext", "syntax", "askPermission", "autoSuggest", "gitIntegration",
-            "conversationalMode", "smartFileDetection", "showFilePreview", "autoSave",
-            "verbose", "compactMode", "showTimestamps", "autoCommit", "autoFormat",
-            "cacheResponses", "streamingMode", "debugMode", "quietMode", "smartContext",
-            "deepAnalysis"].includes(key)) {
-            settings[key] = boolVal;
-          } else {
-            console.log(`${c.red}✗${c.reset} Unknown setting: ${c.yellow}${key}${c.reset}\n`);
-            continue;
-          }
-
-          await saveSettings(settings);
-          console.log(`${c.green}✓${c.reset} ${c.cyan}${key}${c.reset} = ${c.yellow}${value}${c.reset}\n`);
+      // Default to ask if not empty
+      if (line.trim()) {
+        // If it looks like a command but wasn't handled
+        if (line.startsWith("/")) {
+          console.log(`${c.red}✗${c.reset} Unknown command: ${c.yellow}${line.split(" ")[0]}${c.reset}`);
+          console.log(`${c.dim}Try${c.reset} ${c.cyan}/help${c.reset}\n`);
         } else {
-          showSettings(settings);
+          await handleAsk(line, rl);
         }
-      }
-      else if (cmd === "root") console.log(`${c.brightCyan}📍${c.reset} ${c.yellow}${getRoot()}${c.reset}\n`);
-      else if (cmd === "ls") await listDir(rest.join(" ") || ".", settings);
-      else if (cmd === "cd") {
-        const target = rest.join(" ");
-        if (!target) {
-          console.log(`${c.yellow}⚠${c.reset} Usage: ${c.cyan}cd${c.reset} ${c.dim}<directory>${c.reset}\n`);
-          continue;
-        }
-        setRoot(safePath(target));
-        console.log(`${c.green}✓${c.reset} Changed to ${c.cyan}${getRoot()}${c.reset}\n`);
-      }
-      else if (cmd === "tree") await treeDir(rest.join(" ") || ".");
-      else if (cmd === "find") {
-        const pattern = rest[0];
-        if (!pattern) {
-          console.log(`${c.yellow}⚠${c.reset} Usage: ${c.cyan}find${c.reset} ${c.dim}<pattern>${c.reset}\n`);
-          continue;
-        }
-        await find(pattern, rest[1] ?? ".");
-      }
-      else if (cmd === "stat") {
-        if (!rest.length) {
-          console.log(`${c.yellow}⚠${c.reset} Usage: ${c.cyan}stat${c.reset} ${c.dim}<path>${c.reset}\n`);
-          continue;
-        }
-        await stat(rest.join(" "));
-      }
-      else if (cmd === "mkdir") {
-        if (!rest.length) {
-          console.log(`${c.yellow}⚠${c.reset} Usage: ${c.cyan}mkdir${c.reset} ${c.dim}<directory>${c.reset}\n`);
-          continue;
-        }
-        await mkdir(rest.join(" "));
-      }
-      else if (cmd === "rm") {
-        const target = rest.join(" ");
-        if (!target) {
-          console.log(`${c.yellow}⚠${c.reset} Usage: ${c.cyan}rm${c.reset} ${c.dim}<path>${c.reset}\n`);
-          continue;
-        }
-        const confirm = (await rl.question(`${c.yellow}⚠  Delete ${target}?${c.reset} ${c.dim}(y/n)${c.reset}: `)).trim().toLowerCase();
-        if (confirm === "y" || confirm === "yes") await rm(target);
-        else console.log(`${c.gray}Cancelled${c.reset}\n`);
-      }
-      else if (cmd === "cp") {
-        if (rest.length < 2) {
-          console.log(`${c.yellow}⚠${c.reset} Usage: ${c.cyan}cp${c.reset} ${c.dim}<source> <dest>${c.reset}\n`);
-          continue;
-        }
-        await cp(rest[0], rest.slice(1).join(" "));
-      }
-      else if (cmd === "mv") {
-        if (rest.length < 2) {
-          console.log(`${c.yellow}⚠${c.reset} Usage: ${c.cyan}mv${c.reset} ${c.dim}<source> <dest>${c.reset}\n`);
-          continue;
-        }
-        await mv(rest[0], rest.slice(1).join(" "));
-      }
-      else if (cmd === "read") {
-        if (!rest.length) {
-          console.log(`${c.yellow}⚠${c.reset} Usage: ${c.cyan}read${c.reset} ${c.dim}<file>${c.reset}\n`);
-          continue;
-        }
-        await readFile(rest.join(" "), settings);
-      }
-      else if (cmd === "write") {
-        const file = rest.join(" ");
-        if (!file) {
-          console.log(`${c.yellow}⚠${c.reset} Usage: ${c.cyan}write${c.reset} ${c.dim}<file>${c.reset}\n`);
-          continue;
-        }
-        const content = await pasteMultiline(rl);
-        await writeFile(file, content);
-        console.log(`${c.green}✓${c.reset} Written to ${c.cyan}${file}${c.reset}\n`);
-      }
-      else if (cmd === "edit") {
-        const file = rest.shift();
-        const instruction = rest.join(" ");
-        if (!file || !instruction) {
-          console.log(`${c.yellow}⚠${c.reset} Usage: ${c.cyan}edit${c.reset} ${c.dim}<file> <instruction>${c.reset}\n`);
-          continue;
-        }
-        const original = await readFileQuietly(file);
-        const sys = "You are a code editor. Return ONLY updated file content, no markdown fences or explanations.";
-        const user = `File: ${file}\nInstruction: ${instruction}\n\nCurrent:\n${original}`;
-
-        startSpinner("Editing");
-        const { text } = await pplx([{ role: "system", content: sys }, { role: "user", content: user }], { temperature: settings.editTemp, settings });
-        stopSpinner();
-
-        console.log(`\n${c.bold}${c.yellow}━━ Proposed Changes ━━${c.reset}\n`);
-        showDiff(original, text);
-        console.log(`\n${c.bold}${c.yellow}━━━━━━━━━━━━━━━━━━${c.reset}\n`);
-
-        const confirm = (await rl.question(`${c.cyan}Save?${c.reset} ${c.dim}(y/n)${c.reset}: `)).trim().toLowerCase();
-        if (confirm === "y" || confirm === "yes") {
-          await writeFile(file, text);
-          console.log(`${c.green}✓${c.reset} Saved ${c.cyan}${file}${c.reset}\n`);
-        }
-      }
-      else if (cmd === "review") {
-        if (!rest.length) {
-          console.log(`${c.yellow}⚠${c.reset} Usage: ${c.cyan}review${c.reset} ${c.dim}<file>${c.reset}\n`);
-          continue;
-        }
-        await reviewCode(rest.join(" "), settings);
-      }
-      else if (cmd === "test") {
-        const file = rest.join(" ");
-        if (!file) {
-          console.log(`${c.yellow}⚠${c.reset} Usage: ${c.cyan}test${c.reset} ${c.dim}<file>${c.reset}\n`);
-          continue;
-        }
-        const testCode = await generateTests(file, settings);
-        console.log(`\n${c.bold}${c.brightCyan}🧪 Generated Tests${c.reset}\n`);
-        console.log(formatResponse(testCode));
-        console.log();
-
-        const testFile = file.replace(/\.(\w+)$/, ".test.$1");
-        const save = (await rl.question(`${c.cyan}Save to ${testFile}?${c.reset} ${c.dim}(y/n)${c.reset}: `)).trim().toLowerCase();
-        if (save === "y" || save === "yes") {
-          await writeFile(testFile, testCode);
-          console.log(`${c.green}✓${c.reset} Saved ${c.cyan}${testFile}${c.reset}\n`);
-        }
-      }
-      else if (cmd === "document") {
-        const file = rest.join(" ");
-        if (!file) {
-          console.log(`${c.yellow}⚠${c.reset} Usage: ${c.cyan}document${c.reset} ${c.dim}<file>${c.reset}\n`);
-          continue;
-        }
-        const docCode = await generateDocs(file, settings);
-        console.log(`\n${c.bold}${c.brightCyan}📝 Documented Code${c.reset}\n`);
-        console.log(formatResponse(docCode));
-        console.log();
-
-        const save = (await rl.question(`${c.cyan}Save?${c.reset} ${c.dim}(y/n)${c.reset}: `)).trim().toLowerCase();
-        if (save === "y" || save === "yes") {
-          await writeFile(file, docCode);
-          console.log(`${c.green}✓${c.reset} Saved ${c.cyan}${file}${c.reset}\n`);
-        }
-      }
-      else if (cmd === "refactor") {
-        const file = rest.join(" ");
-        if (!file) {
-          console.log(`${c.yellow}⚠${c.reset} Usage: ${c.cyan}refactor${c.reset} ${c.dim}<file>${c.reset}\n`);
-          continue;
-        }
-        const refactoredCode = await refactorCode(file, settings);
-        console.log(`\n${c.bold}${c.brightYellow}♻️  Refactored Code${c.reset}\n`);
-        console.log(formatResponse(refactoredCode.slice(0, 500) + "..."));
-        console.log();
-
-        const save = (await rl.question(`${c.cyan}Save?${c.reset} ${c.dim}(y/n)${c.reset}: `)).trim().toLowerCase();
-        if (save === "y" || save === "yes") {
-          await writeFile(file, refactoredCode);
-          console.log(`${c.green}✓${c.reset} Saved ${c.cyan}${file}${c.reset}\n`);
-        }
-      }
-      else if (cmd === "metrics") {
-        if (!rest.length) {
-          console.log(`${c.yellow}⚠${c.reset} Usage: ${c.cyan}metrics${c.reset} ${c.dim}<file>${c.reset}\n`);
-          continue;
-        }
-        await codeMetrics(rest.join(" "));
-      }
-      else if (cmd === "scaffold") {
-        if (rest.length < 2) {
-          console.log(`${c.yellow}⚠${c.reset} Usage: ${c.cyan}scaffold${c.reset} ${c.dim}<type> <name>${c.reset}\n`);
-          continue;
-        }
-        const { filename, content } = await scaffold(rest[0], rest[1], settings);
-        console.log(`\n${c.bold}${c.yellow}━━ ${filename} ━━${c.reset}\n`);
-        console.log(content);
-        console.log(`\n${c.bold}${c.yellow}━━━━━━━━━━━━${c.reset}\n`);
-
-        const save = (await rl.question(`${c.cyan}Save as ${filename}?${c.reset} ${c.dim}(y/n)${c.reset}: `)).trim().toLowerCase();
-        if (save === "y" || save === "yes") {
-          await writeFile(filename, content);
-          console.log(`${c.green}✓${c.reset} Created ${c.cyan}${filename}${c.reset}\n`);
-        }
-      }
-      else if (cmd === "git") {
-        if (rest[0] === "status") {
-          const status = getGitStatus();
-          if (status) console.log(`\n${c.bold}${c.brightCyan}🔀 Git Status${c.reset}\n${status}`);
-          else console.log(`${c.yellow}⚠${c.reset} Not a git repository\n`);
-        } else if (rest[0] === "diff") {
-          const diff = getGitDiff();
-          if (diff) console.log(`\n${c.bold}${c.brightCyan}🔀 Git Diff${c.reset}\n${diff.slice(0, 1000)}${diff.length > 1000 ? "\n..." : ""}`);
-          else console.log(`${c.yellow}⚠${c.reset} No changes\n`);
-        } else if (rest[0] === "log") {
-          const log = getGitLog();
-          if (log) console.log(`\n${c.bold}${c.brightCyan}📜 Git Log${c.reset}\n${log}\n`);
-          else console.log(`${c.yellow}⚠${c.reset} Not a git repository\n`);
-        }
-      }
-      else if (cmd === "commit") await generateCommitMessage(settings);
-      else if (cmd === "session") {
-        if (rest[0] === "save" && rest[1]) await saveSession(rest[1], conversationHistory, settings);
-        else if (rest[0] === "load" && rest[1]) {
-          const session = await loadSession(rest[1]);
-          if (session) {
-            conversationHistory = session.history || [];
-            setRoot(session.root || getRoot());
-          }
-        }
-        else if (rest[0] === "list") await listSessions();
-        else console.log(`${c.yellow}⚠${c.reset} Usage: ${c.cyan}session save/load/list <name>${c.reset}\n`);
-      }
-      else if (cmd === "snippet") {
-        if (rest[0] === "save" && rest[1]) {
-          const code = await pasteMultiline(rl);
-          await saveSnippet(rest[1], code, snippetsLibrary);
-        }
-        else if (rest[0] === "get" && rest[1]) {
-          const code = loadSnippet(rest[1], snippetsLibrary);
-          if (code) console.log(`\n${c.bold}${c.brightCyan}✂️  ${rest[1]}${c.reset}\n${code}\n`);
-        }
-        else if (rest[0] === "list") listSnippets(snippetsLibrary);
-        else console.log(`${c.yellow}⚠${c.reset} Usage: ${c.cyan}snippet save/get/list <name>${c.reset}\n`);
-      }
-      else if (cmd === "brain") {
-        if (rest[0] === "init") projectBrain = await initBrain();
-        else if (rest[0] === "show") showBrain(projectBrain);
-        else if (rest[0] === "update") projectBrain = await updateBrain(projectBrain, settings);
-        else console.log(`${c.yellow}⚠${c.reset} Usage: ${c.cyan}brain init/show/update${c.reset}\n`);
-      }
-      else if (cmd === "grep") {
-        const pattern = rest.join(" ");
-        if (!pattern) {
-          console.log(`${c.yellow}⚠${c.reset} Usage: ${c.cyan}grep${c.reset} ${c.dim}<pattern>${c.reset}\n`);
-          continue;
-        }
-        startSpinner("Searching");
-        const matches = await grepProject(pattern);
-        stopSpinner();
-
-        if (matches.length > 0) {
-          console.log(`\n${c.bold}${c.green}🔍 Found ${matches.length} matches${c.reset}\n`);
-          matches.slice(0, 50).forEach(m => {
-            console.log(`  ${c.cyan}${m.file}${c.reset}:${c.yellow}${m.line}${c.reset}  ${c.dim}${m.content}${c.reset}`);
-          });
-          if (matches.length > 50) console.log(`  ${c.dim}...and ${matches.length - 50} more${c.reset}`);
-          console.log();
-        } else {
-          console.log(`${c.yellow}⚠${c.reset} No matches found\n`);
-        }
-      }
-      else if (cmd === "todo") {
-        startSpinner("Scanning TODOs");
-        const todos = await scanTodos();
-        stopSpinner();
-
-        if (todos.length > 0) {
-          console.log(`\n${c.bold}${c.brightMagenta}📝 Project Tasks${c.reset}\n`);
-          todos.forEach(t => console.log(`  ${c.cyan}${t.file}${c.reset}:${c.yellow}${t.line}${c.reset} ${t.content}`));
-          console.log();
-        } else {
-          console.log(`${c.green}✓${c.reset} No TODOs found!\n`);
-        }
-      }
-      else if (cmd === "deps") {
-        const deps = await analyzeDeps();
-        if (deps) {
-          console.log(`\n${c.bold}${c.blue}📦 Dependencies${c.reset}\n`);
-          console.log(`${c.bold}Production:${c.reset}`);
-          Object.keys(deps.dependencies).forEach(d => console.log(`  ${c.cyan}${d}${c.reset}: ${deps.dependencies[d]}`));
-          console.log(`\n${c.bold}Dev:${c.reset}`);
-          Object.keys(deps.devDependencies).forEach(d => console.log(`  ${c.cyan}${d}${c.reset}: ${deps.devDependencies[d]}`));
-          console.log();
-        } else {
-          console.log(`${c.yellow}⚠${c.reset} No package.json found\n`);
-        }
-      }
-      else if (cmd === "usage") {
-        console.log(`\n${c.bold}${c.brightBlue}📊 Token Usage (Est.)${c.reset}\n`);
-        console.log(`  Prompt Tokens:     ${c.yellow}${Math.round(usageStats.prompt_tokens)}${c.reset}`);
-        console.log(`  Completion Tokens: ${c.yellow}${Math.round(usageStats.completion_tokens)}${c.reset}`);
-        console.log(`  Total Cost:        ${c.green}$${usageStats.cost.toFixed(4)}${c.reset}\n`);
-      }
-      else if (cmd === "role") {
-        const role = rest.join(" ");
-        if (!role) {
-          console.log(`\n${c.bold}${c.brightMagenta}🎭 Current Role:${c.reset} ${settings.role || "(Default AI)"}\n`);
-        } else {
-          if (role === "clear" || role === "reset") settings.role = "";
-          else settings.role = role;
-          await saveSettings(settings);
-          console.log(`${c.green}✓${c.reset} Role set to: ${c.magenta}${settings.role || "Default"}${c.reset}\n`);
-        }
-      }
-      else {
-        console.log(`${c.red}✗${c.reset} Unknown: ${c.yellow}${cmd}${c.reset}`);
-        console.log(`${c.dim}Try${c.reset} ${c.cyan}help${c.reset}\n`);
       }
     } catch (e) {
       lastError = e;

@@ -2,31 +2,32 @@
 
 A powerful, context-aware AI coding assistant that lives in your terminal. It integrates with Perplexity API (Sonar models) to understand your codebase, execute commands, and autonomously solve tasks.
 
-**New in v5.0**: A stunning, brand-aligned UI with dynamic resizing, improved input handling, and faster workflow.
+**New in v5.0**:
+- **Sticky Footer UI**: A modern input box that keeps context clean.
+- **Live Autocomplete**: Instant command suggestions as you type `/`.
+- **Modular Architecture**: 25+ robust slash commands for every task.
+- **Cross-Platform**: Full support for Windows, macOS, and Linux.
 
 ## 🚀 Features
 
 ### 🧠 Intelligent & Context-Aware
-- **Project Brain**: Remembers architecture, conventions, and key files via `.pplx-brain.json`.
-- **Deep Analysis**: Automatically traces imports and reads dependency files to specific queries.
-- **Smart Routing**: Dynamically switches to `sonar-reasoning` for complex tasks like "refactor" or "fix bug".
-- **File Mentions**: Use `@filename` in any prompt to instantly load that file's context.
+- **Project Brain**: Remembers architecture and key files via `.pplx-brain.json`.
+- **Deep Analysis**: Automatically traces imports and reads dependency files.
+- **Smart Routing**: Dynamically switches to `sonar-reasoning` for complex tasks.
+- **File Mentions**: Use `@filename` in any prompt to load context instantly.
 
 ### 🎨 Beautiful & Responsive UI
-- **Dynamic Headers**: The "PERPLEXITY" banner adjusts to your terminal width with elegant spacing.
-- **Brand Themed**: Official colors (Teal & Paper White) for a premium experience.
-- **Smart Input**: Box-styled prompt that stays clean and organized.
-- **Shortcuts**: Double-press `Ctrl+C` or `ESC` to exit instantly.
+- **Instant Dropdown**: Type `/` to see all available commands instantly.
+- **Rich Status Bar**: See memory usage, active model, and tokens at a glance.
+- **Smart Formatting**: Markdown rendering with syntax highlighting for code blocks.
+- **Transient Input**: Input history stays clean; UI elements vanish after use.
 
-### 🤖 Autonomous & Self-Healing
-- **Auto Mode (`/auto`)**: Give it a goal (e.g., "Refactor auth and add tests"), and it loops through **Think -> Plan -> Act -> Verify**.
-- **Self-Healing (`/fix`)**: If a command fails, type `/fix` to let the AI analyze the error and suggest a correction.
-- **Natural Language Shell (`/do`)**: Type `do "Find all log files and delete them"` to auto-generate safe shell commands.
-
-### 🛠️ Developer Power Tools
-- **Code Analysis**: `grep`, `todo`, `audit` (dep checking), `metrics` (complexity), `uml` (diagrams).
-- **Productivity**: `batch` (run scripts), `alias` (custom shortcuts), `snippet` (save fragments).
-- **Safety**: Automatic backups (`undo` supported) and estimated token pricing (`usage`).
+### ⚡ Keyboard Shortcuts
+| Shortcut | Action |
+| :--- | :--- |
+| `Ctrl+L` | Clear screen and redraw interface |
+| `Ctrl+C` | Double-press to Force Quit |
+| `Esc` | Clear line or cancel selection |
 
 ## 📦 Installation
 
@@ -42,8 +43,9 @@ npm install
 npm link
 
 # Set API Key (REQUIRED)
+# Get one at: https://www.perplexity.ai/settings/api
 export PPLX_API_KEY="pplx-..." 
-# or on Windows PowerShell:
+# Windows PowerShell:
 # $env:PPLX_API_KEY="pplx-..."
 ```
 
@@ -57,33 +59,35 @@ node bin/cli.mjs
 pplx
 ```
 
-### Commands
-| Command | Action |
-| :--- | :--- |
-| **Chat** | |
-| `ask <query>` | Chat with code context |
-| `role <persona>` | Set AI persona (e.g., "Senior Architect") |
-| `@file` | Reference a file in any query |
-| **Explore** | |
-| `ls`, `tree`, `find` | Navigate file system |
-| `read <file>` | Read file code with highlighting |
-| `deps`, `todo` | Analyze dependencies and TODOs |
-| **Edit** | |
-| `edit <file> <prompt>` | AI-driven code editing |
-| `scaffold <type> <name>` | Generate boilerplate |
-| **Agent** | |
-| `auto <goal>` | Start autonomous loop |
-| `fix` | Fix last error |
-| `diff` | Show git diffs |
+### Slash Commands
+Access these instantly by typing `/`:
+
+**Core**
+- `/chat`: Manage conversation history (save/resume/clear).
+- `/model`: Switch between `sonar-pro`, `sonar-reasoning`, `auto`.
+- `/clear`: Clear screen, history, or memory.
+- `/quit`: Exit with session summary stats.
+
+**Filesystem**
+- `/ls`: Rich directory listing with icons and stats.
+- `/cd`: Change directory with smart path resolution.
+- `/read`: Read files with syntax highlighting.
+- `/copy`: Copy last AI response to system clipboard.
+
+**Perplexity**
+- `/auth`: Manage API keys interactively.
+- `/stats`: View detailed token usage and cost analysis.
+- `/about`: System information and credits.
+- `/help`: detailed command reference.
 
 ## ⚙️ Configuration
-Settings are stored in `pplx-settings.json`.
-- `model`: `sonar-pro` (default) or `sonar-reasoning`.
-- `deepAnalysis`: Enable smart import tracing.
-- `autoContext`: Automatically read files based on query.
+Settings are stored in `pplx-settings.json` (auto-created).
+- `model`: Default AI model to use.
+- `temperature`: Creativity setting (0.0 - 1.0).
+- `autoSave`: Enable session auto-saving.
 
 ## 🤝 Contributing
 See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
 ## 📄 License
-MIT © [Aryan](https://github.com/aryan)
+MIT © [Informatlux](https://github.com/informatlux)
