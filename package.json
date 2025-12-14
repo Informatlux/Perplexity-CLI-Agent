@@ -1,5 +1,8 @@
 {
   "name": "pplx-cli-agent",
   "version": "1.0.0",
-  "type": "module"
+  "type": "module",
+  "bin": {
+    "pplx": "./bin/cli.mjs"
+  }
 }

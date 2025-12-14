@@ -1,6 +1,8 @@
-# Perplexity CLI Agent (v4.5)
+# Perplexity CLI Agent (v5.0)
 
 A powerful, context-aware AI coding assistant that lives in your terminal. It integrates with Perplexity API (Sonar models) to understand your codebase, execute commands, and autonomously solve tasks.
+
+**New in v5.0**: A stunning, brand-aligned UI with dynamic resizing, improved input handling, and faster workflow.
 
 ## 🚀 Features
 
@@ -9,6 +11,12 @@ A powerful, context-aware AI coding assistant that lives in your terminal. It in
 - **Deep Analysis**: Automatically traces imports and reads dependency files to specific queries.
 - **Smart Routing**: Dynamically switches to `sonar-reasoning` for complex tasks like "refactor" or "fix bug".
 - **File Mentions**: Use `@filename` in any prompt to instantly load that file's context.
+
+### 🎨 Beautiful & Responsive UI
+- **Dynamic Headers**: The "PERPLEXITY" banner adjusts to your terminal width with elegant spacing.
+- **Brand Themed**: Official colors (Teal & Paper White) for a premium experience.
+- **Smart Input**: Box-styled prompt that stays clean and organized.
+- **Shortcuts**: Double-press `Ctrl+C` or `ESC` to exit instantly.
 
 ### 🤖 Autonomous & Self-Healing
 - **Auto Mode (`/auto`)**: Give it a goal (e.g., "Refactor auth and add tests"), and it loops through **Think -> Plan -> Act -> Verify**.
@@ -21,6 +29,7 @@ A powerful, context-aware AI coding assistant that lives in your terminal. It in
 - **Safety**: Automatic backups (`undo` supported) and estimated token pricing (`usage`).
 
 ## 📦 Installation
+
 ```bash
 # Clone the repo
 git clone https://github.com/aryan/perplexity-cli-agent.git
@@ -29,6 +38,9 @@ cd perplexity-cli-agent
 # Install dependencies
 npm install
 
+# Link command (Optional, to use 'pplx' globally)
+npm link
+
 # Set API Key (REQUIRED)
 export PPLX_API_KEY="pplx-..." 
 # or on Windows PowerShell:
@@ -36,9 +48,13 @@ export PPLX_API_KEY="pplx-..."
 ```
 
 ## 🎮 Usage
+
 Start the agent:
+
 ```bash
-node agent.mjs
+node bin/cli.mjs
+# OR if linked:
+pplx
 ```
 
 ### Commands

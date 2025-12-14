@@ -1,5 +1,5 @@
 {
-  "model": "sonar",
+  "model": "sonar-pro",
   "temperature": 0.2,
   "editTemp": 0.2,
   "maxHistory": 10,
