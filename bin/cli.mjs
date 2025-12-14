@@ -63,6 +63,8 @@ let snippetsLibrary = await loadSnippetsLibrary();
 let projectBrain = await loadBrain();
 let lastCommand = "";
 let lastError = null;
+const commandsRegistry = getCommands();
+const cmdList = Object.values(commandsRegistry).map(mod => mod.meta).filter(Boolean);
 
 async function handleAsk(prompt, rl) {
   conversationHistory.push({ role: "user", content: prompt });
@@ -153,6 +155,10 @@ async function handleAsk(prompt, rl) {
   console.log();
 
   suggestNextAction("ask", settings);
+  
+  // Add visual separator after response
+  console.log(`${c.dim}${"─".repeat(Math.min(process.stdout.columns || 80, 80))}${c.reset}`);
+  console.log(); // Extra spacing before next prompt
 }
 
 async function main() {
@@ -254,10 +260,7 @@ async function main() {
     const topBorder = `${c.pplx.teal}╭${lineChar.repeat(boxWidth - 2)}╮${c.reset}`;
     const botBorder = `${c.pplx.teal}╰${lineChar.repeat(boxWidth - 2)}╯${c.reset}`;
 
-    // Status Lines
-    // L1: ~                                                no sandbox (see /docs)
-    // L2:                                                  auto (100% context left) | 131.4 MB
-
+    // Status Lines (ABOVE the box)
     const statusL1Left = `${c.dim}${cwd}${c.reset}`;
     const statusL1Right = `${c.dim}no sandbox (see /docs)${c.reset}`;
     const paddingL1 = width - 2 - cwd.length - 22; // 22 is ~ length of right string
@@ -267,107 +270,166 @@ async function main() {
     const paddingL2 = width - 2 - stripAnsi(statusL2Right).length;
     const statusLine2 = " " + " ".repeat(Math.max(0, paddingL2)) + statusL2Right;
 
-    // Render Box & Status
-    console.log(topBorder);
-    console.log(" "); // Middle (Prompt line)
-    console.log(botBorder);
+    // Render Status ABOVE Box
     console.log(statusLine1);
     console.log(statusLine2);
-
-    // Initial Cursor Position: Up 4 lines (Status2, Status1, BotBorder, Middle)
-    process.stdout.write('\x1B[4A');
-
-    // Prompt
-    const prompt = `${c.pplx.teal}│${c.reset} ${c.bold}${c.pplx.white || c.white}>${c.reset} `;
+    console.log();
+    
+    // Draw complete sealed box
+    console.log(topBorder);
+    process.stdout.write(`${c.pplx.teal}│${c.reset} ${c.bold}${c.pplx.white || c.white}>${c.reset} `);
+    
+    // Store position for after input
+    const boxComplete = false; // Will close after readline
 
     // --- Live Autocomplete Logic ---
-    const keypressHandler = () => {
-      // Wait for rl to update 'line'
-      setTimeout(() => {
-        const input = rl.line;
+    if (process.stdin.isTTY) {
+      emitKeypressEvents(process.stdin);
+    }
 
-        // Only trigger if line starts with /
-        if (input.startsWith("/")) {
-          const query = input.slice(1).toLowerCase();
-          const matches = cmdList.filter(cmd => cmd.name.startsWith(query));
+    // State for interactive menu
+    let selectedIndex = 0;
+    let scrollOffset = 0;
+    let inMenuMode = false;
+    let cachedHistory = [];
+    let boxClosed = false; // Track if box was closed by menu rendering
+    const MENU_HEIGHT = 5;
 
-          // Save Cursor
-          process.stdout.write('\x1B[s');
+    const keypressHandler = (str, key) => {
+      // Use setImmediate to ensure rl.line is updated
+      setImmediate(() => {
+        const input = rl.line || "";
 
-          // Move down to Bottom Border (2 lines down from prompt)
-          // Prompt line -> BotBorder -> Status1
-          process.stdout.write('\x1B[2B');
-          process.stdout.write('\x1B[1G'); // Start of line
+        // Toggle Menu Mode
+        if (input.startsWith("/") && !inMenuMode) {
+          inMenuMode = true;
+          cachedHistory = rl.history;
+          rl.history = []; // Disable history navigation
+          selectedIndex = 0;
+          scrollOffset = 0;
+        } else if (!input.startsWith("/") && inMenuMode) {
+          inMenuMode = false;
+          rl.history = cachedHistory; // Restore
+        }
 
-          // Clear Down
-          process.stdout.write('\x1B[0J');
+        if (!input.startsWith("/")) {
+          inMenuMode = false;
+          // Ensure history is back if we exited via backspace
+          if (rl.history.length === 0 && cachedHistory.length > 0) {
+            rl.history = cachedHistory;
+          }
+          return;
+        }
 
-          if (matches.length > 0) {
-            // Render Suggestions
-            const limit = 5;
-            matches.slice(0, limit).forEach(cmd => {
-              const namePadding = " ".repeat(12 - cmd.name.length);
-              console.log(`${c.pplx.teal}${cmd.name}${c.reset}${namePadding} ${c.dim}${cmd.description}${c.reset}`);
-            });
-            if (matches.length > limit) {
-              console.log(`${c.dim}(${matches.length} matches)${c.reset}`);
+        // --- Interactive Navigation ---
+        if (key) {
+          if (key.name === 'down') {
+            // Prevent default behavior if possible (already disabled history)
+            const matches = cmdList.filter(cmd => cmd.name && cmd.name.startsWith(input.slice(1).toLowerCase()));
+            if (selectedIndex < matches.length - 1) {
+              selectedIndex++;
+              if (selectedIndex >= scrollOffset + MENU_HEIGHT) {
+                scrollOffset++;
+              }
+            }
+          } else if (key.name === 'up') {
+            if (selectedIndex > 0) {
+              selectedIndex--;
+              if (selectedIndex < scrollOffset) {
+                scrollOffset--;
+              }
+            }
+          } else if (key.name === 'tab' || key.name === 'right') {
+            // Auto-complete selection
+            const matches = cmdList.filter(cmd => cmd.name && cmd.name.startsWith(input.slice(1).toLowerCase()));
+            if (matches[selectedIndex]) {
+              const cmdName = "/" + matches[selectedIndex].name;
+              // Replace input
+              rl.write(null, { ctrl: true, name: 'u' });
+              rl.write(cmdName + " ");
+              inMenuMode = false;
+              rl.history = cachedHistory;
+              return; // Don't re-render list immediately, standard loop handles prompt
             }
           } else {
-            // No match or just "/"
-            // Maybe restore status bar? 
-            // For now, keep empty to be clean "dropdown" style
-          }
-
-          // Restore Cursor
-          process.stdout.write('\x1B[u');
-        } else {
-          // Not a command, ensure status bar is visible?
-          // If we previously cleared it, we should redraw it.
-          // This is tricky without "knowing" previous state.
-          // Simplified: If not '/', we don't clear, assuming status bar is there.
-          // But if user backspaced from '/', we need to PUT BACK the status bar.
-          // For this iteration, let's just leave it blank if they typed '/' then deleted it, 
-          // until they hit Enter (which refreshes loop).
-          // Or: Redraw status bar if empty/not slash?
-          if (input === "" || !input.includes("/")) {
-            process.stdout.write('\x1B[s');
-            process.stdout.write('\x1B[2B');
-            process.stdout.write('\x1B[1G');
-            process.stdout.write(botBorder + "\n" + statusLine1 + "\n" + statusLine2); // Poor man's redraw
-            process.stdout.write('\x1B[u');
+            // Reset selection on typing (optional, or keep it?)
+            // Better to reset if the matches change drastically
+            // But for now, let's just clamp
           }
         }
-      }, 1);
+
+        const query = input.slice(1).toLowerCase();
+        const matches = cmdList.filter(cmd => cmd.name && cmd.name.startsWith(query));
+
+        // Clamp Selection
+        if (selectedIndex >= matches.length) selectedIndex = Math.max(0, matches.length - 1);
+
+        // --- Safe UI Draw ---
+        process.stdout.write('\x1B[s'); // Save cursor position
+        process.stdout.write('\x1B[?25l'); // Hide cursor
+
+        // Move down one line and draw dropdown
+        process.stdout.write('\x1B[1E'); // Move to beginning of next line
+        process.stdout.write('\x1B[0J'); // Clear from here down
+        
+        // Draw bottom border
+        console.log(botBorder);
+        boxClosed = true; // Mark as closed
+        console.log(); // Spacing
+
+        if (matches.length > 0) {
+          const shown = matches.slice(scrollOffset, scrollOffset + MENU_HEIGHT);
+
+          shown.forEach((cmd, i) => {
+            const isSelected = (scrollOffset + i) === selectedIndex;
+            const cmdStr = `/${cmd.name}`;
+            const padding = " ".repeat(Math.max(1, 15 - cmdStr.length));
+            const desc = cmd.description || '';
+
+            if (isSelected) {
+              // Selection Style: Perplexity Teal Background, Black Text
+              console.log(`${c.pplx.bgTeal}${c.pplx.black} ${cmdStr} ${padding}${desc} ${" ".repeat(Math.max(0, boxWidth - cmdStr.length - padding.length - desc.length - 4))}${c.reset}`);
+            } else {
+              console.log(`${c.pplx.teal}${cmdStr}${c.reset}${padding}${c.dim}${desc}${c.reset}`);
+            }
+          });
+
+          // Scroll info below the dropdown
+          if (matches.length > MENU_HEIGHT) {
+            const percent = Math.round(((scrollOffset + MENU_HEIGHT) / matches.length) * 100);
+            console.log(`${c.dim}(${scrollOffset + 1}-${Math.min(scrollOffset + MENU_HEIGHT, matches.length)} of ${matches.length}) ${percent}%${c.reset}`);
+          }
+        } else {
+          // No matches, just show border
+          // Border already drawn above
+        }
+        // Note: Bottom border already drawn before dropdown
+
+        process.stdout.write('\x1B[u'); // Restore
+        process.stdout.write('\x1B[?25h'); // Show
+      });
     };
 
     process.stdin.on('keypress', keypressHandler);
 
-    // Readline interaction
-    let line = await rl.question(prompt);
+    // Readline interaction (empty prompt since we already drew it)
+    let line = await rl.question('');
     line = line.trim();
 
-    // Clean up listener
+    // Clean up
     process.stdin.removeListener('keypress', keypressHandler);
+    if (inMenuMode) {
+      rl.history = cachedHistory;
+    }
 
-    // CLEAR BOTTOM UI:
-    // User hit enter, so cursor is now at the start of the line BELOW the input (The Bottom Border Line).
-    // We want to erase everything from here down (Bottom Border + Status Lines).
-    process.stdout.write('\x1B[0J'); // Clear screen from cursor down
-
-    // We also want to close the box visually in history? 
-    // If we clear the bottom border, it looks like an open-ended box in history:
-    // ╭──────╮
-    // │ > hi
-    // (response)
-    //
-    // The user's request says "dont print the remaining bottom part". 
-    // And "look like the image". The image SHOWS a bottom border in the "Active" state, but the second image shows just the top part for history?
-    // Actually, normally CLI history is just text. 
-    // If I leave the bottom border, it looks like a box.
-    // If I remove it, it looks cleaner.
-    // Let's stick to the "Clear Down" approach as it's the most standard "Transient UI" pattern.
-    // BUT, we might want to print a simple "closing" line if we want it to look like a box in history.
-    // Let's just do valid clearing first.
+    // Close the box if it wasn't already closed by menu
+    if (!boxClosed) {
+      console.log(botBorder);
+    }
+    
+    // Clear any remaining dropdown content
+    process.stdout.write('\x1B[0J');
+    console.log(); // Spacing
 
     if (!line) continue;
 

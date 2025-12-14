@@ -1,58 +1,81 @@
 
 import { c } from "../ui/colors.mjs";
+import os from "os";
 
 export const meta = {
   name: "quit",
-  description: "Exit the CLI with a summary",
+  description: "Exit the session with a summary",
   usage: "/quit"
 };
 
+const formatTime = (seconds) => {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.ceil(seconds % 60);
+
+  const parts = [];
+  if (h > 0) parts.push(`${h}h`);
+  if (m > 0) parts.push(`${m}m`);
+  parts.push(`${s}s`);
+  return parts.join(' ');
+};
+
 export async function execute(args, context) {
-  // 1. Calculate Session Stats
-  const endTime = Date.now();
-  const startTime = context.startTime || (Date.now() - 1000); // Fallback
-  const durationSec = Math.round((endTime - startTime) / 1000);
+  const uptime = process.uptime();
+  // Use randomUUID from global or crypto
+  const sessionID = crypto.randomUUID ? crypto.randomUUID() : (Math.random().toString(36).substring(2) + Math.random().toString(36).substring(2));
 
-  const historyCount = context.conversationHistory ? context.conversationHistory.length : 0;
-  const filesRead = context.filesReadCount || 0; // Assuming we track this
-  const tokensUsed = context.usageStats ? Math.round(context.usageStats.prompt_tokens + context.usageStats.completion_tokens) : 0;
+  // Mock Metrics (since we don't track them granularly yet)
+  const toolCalls = context.toolUsage?.total || 0;
+  const toolSuccess = context.toolUsage?.success || 0;
+  const toolFail = context.toolUsage?.failed || 0;
+  const rate = toolCalls > 0 ? ((toolSuccess / toolCalls) * 100).toFixed(1) : "0.0";
 
-  console.log(`\n${c.bold}${c.pplx.teal}👋 formatting Session Summary${c.reset} \n`);
+  const width = process.stdout.columns || 80;
+  const boxWidth = Math.min(width - 4, 70);
+  const lineChar = "─";
+  const topBorder = `╭${lineChar.repeat(boxWidth - 2)}╮`;
+  const botBorder = `╰${lineChar.repeat(boxWidth - 2)}╯`;
 
-  // 2. Display Stats Box
-  const width = 50;
-  const line = "─".repeat(width);
-  console.log(`${c.dim}╭${line}╮${c.reset} `);
+  console.log("");
+  console.log(`  ${c.pplx.teal}${topBorder}${c.reset}`);
 
-  const row = (label, value) => {
-    const pad = width - label.length - String(value).length - 2;
-    return `${c.dim}│${c.reset} ${label} ${" ".repeat(Math.max(0, pad))} ${c.cyan}${value}${c.reset} ${c.dim}│${c.reset} `;
+  // Content Helper
+  const printLine = (str, colorWrapper = (s) => s) => {
+    // Remove ansi for length calc
+    // This is a rough estimation if colorWrapper adds ansi
+    const visibleLen = str.replace(/\x1B\[[0-9;]*[mK]/g, '').length;
+    const pad = boxWidth - 2 - visibleLen - 2; // -2 for margins
+    console.log(`  ${c.pplx.teal}│${c.reset}  ${colorWrapper(str)}${" ".repeat(Math.max(0, pad))}${c.pplx.teal}│${c.reset}`);
   };
 
-  console.log(row("Duration", `${durationSec} s`));
-  console.log(row("Messages", historyCount));
-  console.log(row("Tokens Used", tokensUsed));
-  console.log(row("Files Accessed", filesRead)); // Needs tracking in context
+  const printPair = (label, value) => {
+    // label + spacing + value
+    // Fixed chars: │(1) + "  "(2) ... "  "(2) + │(1) = 6 chars overhead
+    const labelLen = label.length;
+    const valLen = value.replace(/\x1B\[[0-9;]*[mK]/g, '').length;
+    const space = Math.max(0, boxWidth - 6 - labelLen - valLen);
+    console.log(`  ${c.pplx.teal}│${c.reset}  ${c.bold}${label}${c.reset}${" ".repeat(space)}${value}  ${c.pplx.teal}│${c.reset}`);
+  };
 
-  console.log(`${c.dim}╰${line}╯${c.reset} `);
+  printLine("");
+  printLine("Agent powering down. Goodbye!", (s) => `${c.bold}${c.pplx.teal}${s}${c.reset}`);
+  printLine("");
 
-  // 3. Save Context (Auto-Save)
-  if (context.settings.autoSave) {
-    console.log(`\n${c.dim} Auto - saving session...${c.reset} `);
-    // await saveSession("autosave-last", context.conversationHistory);
-    console.log(`${c.green}✓ Saved.${c.reset} `);
-  }
+  printLine("Interaction Summary", (s) => `${c.bold}${c.white}${s}${c.reset}`);
+  printPair("Session ID:", `${c.dim}${sessionID}${c.reset}`);
+  printPair("Tool Calls:", `${c.yellow}${toolCalls}${c.reset} ( ${c.green}√ ${toolSuccess}${c.reset} ${c.red}x ${toolFail}${c.reset} )`);
+  printPair("Success Rate:", `${c.pplx.teal}${rate}%${c.reset}`);
+  printLine("");
 
-  // 4. Motivational Quote (Easter Egg)
-  const quotes = [
-    "Keep shipping.",
-    "Code is poetry.",
-    "See you in the repo.",
-    "Terminal closed, mind open."
-  ];
-  const quote = quotes[Math.floor(Math.random() * quotes.length)];
-  console.log(`\n${c.italic}${quote}${c.reset} \n`);
+  printLine("Performance", (s) => `${c.bold}${c.white}${s}${c.reset}`);
+  printPair("Wall Time:", `${c.white}${formatTime(uptime)}${c.reset}`);
+  printPair("Agent Active:", `${c.dim}0s${c.reset}`);
+  printPair(" » API Time:", `${c.dim}0s (0.0%)${c.reset}`);
+  printPair(" » Tool Time:", `${c.dim}0s (0.0%)${c.reset}`);
 
-  // 5. Exit
+  printLine("");
+  console.log(`  ${c.pplx.teal}${botBorder}${c.reset}\n`);
+
   process.exit(0);
 }

@@ -14,10 +14,13 @@ export const c = {
   brightCyan: "\x1b[96m",
   brightMagenta: "\x1b[95m",
   brightYellow: "\x1b[93m",
+  black: "\x1b[30m",
+  bgCyan: "\x1b[46m",
 
   // Perplexity Brand Colors
   pplx: {
     teal: "\x1b[38;2;32;128;141m", // #20808D
+    bgTeal: "\x1b[48;2;32;128;141m", // #20808D Background
     white: "\x1b[38;2;251;250;244m", // #FBFAF4
     black: "\x1b[38;2;9;23;23m", // #091717
   }
