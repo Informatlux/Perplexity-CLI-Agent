@@ -1,0 +1,10 @@
+{
+  "model": "sonar",
+  "temperature": 0.2,
+  "editTemp": 0.2,
+  "maxHistory": 10,
+  "autoContext": true,
+  "syntax": true,
+  "askPermission": true,
+  "conversationalMode": false
+}
