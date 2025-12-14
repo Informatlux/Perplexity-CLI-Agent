@@ -27,6 +27,7 @@ let ROOT = path.resolve(process.argv[2] ?? process.cwd());
 const SETTINGS_FILE = path.join(process.cwd(), "pplx-settings.json");
 const SESSION_DIR = path.join(process.cwd(), ".pplx-sessions");
 const SNIPPETS_FILE = path.join(process.cwd(), "pplx-snippets.json");
+const BRAIN_FILE = path.join(process.cwd(), ".pplx-brain.json");
 
 // Load settings
 async function loadSettings() {
@@ -60,7 +61,9 @@ async function loadSettings() {
       debugMode: false,
       quietMode: false,
       smartContext: true,
-      deepAnalysis: false
+      smartContext: true,
+      deepAnalysis: false,
+      role: ""
     };
   }
 }
@@ -70,6 +73,15 @@ let conversationHistory = [];
 let projectContext = null;
 let snippetsLibrary = {};
 let lastCommand = "";
+let lastError = null;
+let projectBrain = {
+  name: path.basename(ROOT),
+  description: "",
+  architecture: "",
+  conventions: "",
+  importantFiles: [],
+  lastUpdated: null
+};
 
 // Load snippets
 try {
@@ -77,6 +89,14 @@ try {
   snippetsLibrary = JSON.parse(data);
 } catch {
   snippetsLibrary = {};
+}
+
+// Load brain
+try {
+  const data = await fs.readFile(BRAIN_FILE, "utf8");
+  projectBrain = JSON.parse(data);
+} catch {
+  // Use default empty brain
 }
 
 let MODEL = settings.model;
@@ -110,6 +130,11 @@ async function saveSnippets() {
   await fs.writeFile(SNIPPETS_FILE, JSON.stringify(snippetsLibrary, null, 2), "utf8");
 }
 
+async function saveBrain() {
+  projectBrain.lastUpdated = new Date().toISOString();
+  await fs.writeFile(BRAIN_FILE, JSON.stringify(projectBrain, null, 2), "utf8");
+}
+
 function safePath(p) {
   const full = path.resolve(ROOT, p);
   if (!full.startsWith(ROOT + path.sep) && full !== ROOT) {
@@ -118,23 +143,39 @@ function safePath(p) {
   return full;
 }
 
-async function pplx(messages, { temperature = undefined } = {}) {
+async function pplx(messages, { temperature = undefined, model = undefined } = {}) {
   const temp = temperature ?? settings.temperature;
+  const useModel = model ?? MODEL;
+
   const r = await fetch("https://api.perplexity.ai/chat/completions", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${KEY}`,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({ model: MODEL, messages, temperature: temp })
+    body: JSON.stringify({ model: useModel, messages, temperature: temp })
   });
-  
+
   const j = await r.json();
   if (!r.ok) {
     throw new Error(`API Error: ${j?.error?.message ?? "Unknown error"}`);
   }
   const text = j?.choices?.[0]?.message?.content ?? JSON.stringify(j);
   return { text, raw: j };
+}
+
+// Semantic Router
+function classifyQuery(query) {
+  const complexPatterns = [
+    /fix.*bug/i, /debug/i, /why.*fail/i, /root cause/i,
+    /complex/i, /architecture/i, /design pattern/i,
+    /optimize/i, /refactor/i, /security/i, /memory leak/i
+  ];
+
+  if (complexPatterns.some(p => p.test(query))) {
+    return "sonar-reasoning";
+  }
+  return null; // usage default
 }
 
 // Git helpers
@@ -165,9 +206,9 @@ function getGitDiff() {
 
 function getGitLog(count = 5) {
   try {
-    return execSync(`git log -${count} --pretty=format:"%h - %s (%cr) <%an>"`, { 
-      cwd: ROOT, 
-      encoding: "utf8" 
+    return execSync(`git log -${count} --pretty=format:"%h - %s (%cr) <%an>"`, {
+      cwd: ROOT,
+      encoding: "utf8"
     });
   } catch {
     return "";
@@ -194,6 +235,36 @@ function formatSize(bytes) {
   return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + " " + sizes[i];
 }
 
+function showDiff(original, modified) {
+  const oldLines = original.split("\n");
+  const newLines = modified.split("\n");
+  let output = "";
+
+  // Simple diff: look for changed blocks
+  // Since full diff algo is complex, we just show strict differences
+  // Or simpler: just print new file with some green? 
+  // Let's do a basic visual diff
+
+  // NOTE: For best experience, we use a simplistic line comparison
+  // In a real app we'd use 'diff' package
+
+  console.log(`${c.dim}--- Original${c.reset}`);
+  console.log(`${c.dim}+++ Modified${c.reset}`);
+
+  let i = 0, j = 0;
+  while (i < oldLines.length || j < newLines.length) {
+    if (i < oldLines.length && j < newLines.length && oldLines[i] === newLines[j]) {
+      // Unchanged
+      // console.log(`  ${c.dim}${oldLines[i]}${c.reset}`);
+      i++; j++;
+    } else {
+      if (i < oldLines.length) console.log(`${c.red}- ${oldLines[i]}${c.reset}`);
+      if (j < newLines.length) console.log(`${c.green}+ ${newLines[j]}${c.reset}`);
+      i++; j++;
+    }
+  }
+}
+
 function highlightSyntax(line) {
   if (!settings.syntax) return line;
   line = line.replace(/\b(function|const|let|var|class|async|await|import|export|return|if|else|for|while|try|catch|throw|new|public|private|protected|override|fun|val)\b/g, `${c.magenta}$1${c.reset}`);
@@ -210,7 +281,7 @@ async function readFile(rel) {
   const stats = await fs.stat(full);
 
   console.log(`${c.bold}${c.brightCyan}📄 ${rel}${c.reset}${c.dim} · ${lines.length} lines · ${formatSize(stats.size)}${c.reset}\n`);
-  
+
   lines.forEach((line, i) => {
     const lineNum = String(i + 1).padStart(4, " ");
     console.log(`${c.gray}${lineNum}${c.reset} ${highlightSyntax(line)}`);
@@ -233,21 +304,21 @@ async function writeFile(rel, content) {
 async function listDir(rel = ".") {
   const dir = safePath(rel);
   const items = await fs.readdir(dir, { withFileTypes: true });
-  
+
   if (items.length === 0) {
     console.log(`${c.gray}(empty directory)${c.reset}\n`);
     return;
   }
 
   console.log(`${c.bold}${c.brightCyan}📁 ${path.basename(dir)}${c.reset}${c.dim} · ${items.length} items${c.reset}\n`);
-  
+
   const dirs = items.filter(it => it.isDirectory()).sort((a, b) => a.name.localeCompare(b.name));
   const files = items.filter(it => !it.isDirectory()).sort((a, b) => a.name.localeCompare(b.name));
-  
+
   for (const it of dirs) {
     console.log(`  ${c.blue}📂 ${it.name}/${c.reset}`);
   }
-  
+
   for (const it of files) {
     const full = path.join(dir, it.name);
     const stats = await fs.stat(full);
@@ -280,7 +351,7 @@ async function cp(src, dest) {
   const fullSrc = safePath(src);
   const fullDest = safePath(dest);
   const stats = await fs.stat(fullSrc);
-  
+
   if (stats.isDirectory()) {
     await copyDir(fullSrc, fullDest);
   } else {
@@ -315,17 +386,17 @@ async function treeDir(rel = ".", depth = 0, maxDepth = 3) {
   if (depth === 0) {
     console.log(`${c.bold}${c.brightCyan}🌳 ${path.basename(safePath(rel))}${c.reset}\n`);
   }
-  
+
   if (depth > maxDepth) return;
-  
+
   const dir = safePath(rel);
   const items = await fs.readdir(dir, { withFileTypes: true });
   const prefix = "  ".repeat(depth);
-  
+
   for (const item of items) {
     if (item.name.startsWith(".")) continue;
     const icon = item.isDirectory() ? "📂" : getFileIcon(path.extname(item.name));
-    
+
     if (item.isDirectory()) {
       console.log(`${prefix}${c.blue}├─ ${icon} ${item.name}/${c.reset}`);
       await treeDir(path.join(rel, item.name), depth + 1, maxDepth);
@@ -333,7 +404,7 @@ async function treeDir(rel = ".", depth = 0, maxDepth = 3) {
       console.log(`${prefix}├─ ${icon} ${item.name}`);
     }
   }
-  
+
   if (depth === 0) console.log();
 }
 
@@ -348,21 +419,21 @@ async function find(pattern, rel = ".") {
       if (item.name.startsWith(".")) continue;
       const itemPath = path.join(currentDir, item.name);
       const itemRel = path.join(currentRel, item.name);
-      
+
       if (regex.test(item.name)) {
         matches.push({ path: itemRel, isDir: item.isDirectory() });
       }
-      
+
       if (item.isDirectory()) {
         try {
           await search(itemPath, itemRel);
-        } catch (e) {}
+        } catch (e) { }
       }
     }
   }
 
   await search(dir, rel);
-  
+
   if (matches.length === 0) {
     console.log(`${c.yellow}⚠${c.reset} No matches for ${c.cyan}"${pattern}"${c.reset}\n`);
   } else {
@@ -380,7 +451,7 @@ async function stat(rel) {
   const full = safePath(rel);
   const stats = await fs.stat(full);
   const isDir = stats.isDirectory();
-  
+
   console.log(`
 ${c.bold}${c.brightCyan}${isDir ? '📂' : '📄'} ${rel}${c.reset}
 
@@ -437,7 +508,7 @@ async function collectProjectFiles(maxDepth = 2) {
           }
         }
       }
-    } catch (e) {}
+    } catch (e) { }
   }
 
   await scan(ROOT);
@@ -455,19 +526,19 @@ function isConversationalQuery(query) {
     /^(lol|lmao|haha|😂|👍)$/i,
     /^(oh|hmm|uh|ah|wow)$/i,
   ];
-  
+
   const queryLower = query.toLowerCase().trim();
-  
+
   // Check if it's just a short conversational response
   if (queryLower.length < 15 && conversational.some(r => r.test(queryLower))) {
     return true;
   }
-  
+
   // Check if it's a simple acknowledgment with "bro", "man", etc.
   if (/^(ok|cool|nice|thanks|alright)\s+(bro|man|dude|mate)/i.test(queryLower)) {
     return true;
   }
-  
+
   return false;
 }
 
@@ -476,12 +547,12 @@ async function discoverRelevantFiles(query) {
   if (settings.smartFileDetection && isConversationalQuery(query)) {
     return [];
   }
-  
+
   const projectType = await analyzeProject();
   const allFiles = await collectProjectFiles(3);
   const relevantFiles = [];
   const queryLower = query.toLowerCase();
-  
+
   // Check if query needs files at all
   const needsFiles = [
     /what.*do/i, /explain/i, /show/i, /find/i, /search/i,
@@ -489,12 +560,12 @@ async function discoverRelevantFiles(query) {
     /code/i, /file/i, /implement/i, /how.*work/i,
     /manifest/i, /permission/i, /gradle/i, /build/i
   ];
-  
+
   if (!needsFiles.some(pattern => pattern.test(queryLower))) {
     if (settings.verbose) console.log(`${c.dim}[Smart detection: No files needed]${c.reset}\n`);
     return [];
   }
-  
+
   if (projectType === "android") {
     if (queryLower.includes("manifest") || queryLower.includes("permission")) {
       relevantFiles.push(...allFiles.filter(f => f.includes("AndroidManifest.xml")));
@@ -506,43 +577,100 @@ async function discoverRelevantFiles(query) {
       relevantFiles.push(...allFiles.filter(f => f.includes("build.gradle")));
     }
   }
-  
+
   if (queryLower.includes("what") || queryLower.includes("about") || queryLower.includes("do")) {
     relevantFiles.push(...allFiles.filter(f => /readme/i.test(f)));
   }
-  
+
   if (relevantFiles.length === 0 && settings.smartContext) {
-    relevantFiles.push(...allFiles.filter(f => 
+    relevantFiles.push(...allFiles.filter(f =>
       f.includes("Main") || f.includes("index") || f.includes("app") ||
       f.includes("build.gradle") || f.includes("AndroidManifest")
     ));
   }
-  
+
   const maxFiles = settings.maxFilesPerQuery || 8;
   return [...new Set(relevantFiles)].slice(0, maxFiles);
+}
+
+// Smart Import Tracing Helpers
+async function traceImports(files) {
+  const tracedFiles = new Set();
+  const results = [];
+
+  for (const file of files) {
+    try {
+      const content = await readFileQuietly(file);
+      const importRegex = /import\s+.*?\s+from\s+['"](.*?)['"]/g;
+      let match;
+
+      while ((match = importRegex.exec(content)) !== null) {
+        const importPath = match[1];
+        if (importPath.startsWith(".")) {
+          try {
+            const resolved = resolveImportPath(file, importPath);
+            if (resolved && !files.includes(resolved) && !tracedFiles.has(resolved)) {
+              tracedFiles.add(resolved);
+              const fileContent = await readFileQuietly(resolved);
+              results.push({
+                file: resolved,
+                content: fileContent.split("\n").slice(0, 50).join("\n") + "\n... (more)"
+              });
+            }
+          } catch (e) { }
+        }
+      }
+    } catch (e) { }
+  }
+  return results;
+}
+
+function resolveImportPath(sourceFile, importPath) {
+  const dir = path.dirname(safePath(sourceFile));
+  const full = path.resolve(dir, importPath);
+  // Try extensions
+  const extensions = ["", ".js", ".mjs", ".ts", ".jsx", ".tsx", ".json"];
+  for (const ext of extensions) {
+    const p = full + ext;
+    if (fsExistsSync(p)) return path.relative(ROOT, p);
+  }
+  return null;
+}
+
+function fsExistsSync(path) {
+  try {
+    execSync(`test -e "${path}"`); // Linux/Mac
+    return true;
+  } catch {
+    try {
+      // Windows fallback
+      execSync(`if exist "${path}" (exit 0) else (exit 1)`);
+      return true;
+    } catch { return false; }
+  }
 }
 
 async function requestFilePermission(files, rl) {
   console.log(`\n${c.bold}${c.yellow}🔐 Permission Request${c.reset}\n`);
   console.log(`${c.dim}AI wants to read these files:${c.reset}\n`);
-  
+
   for (let i = 0; i < files.length; i++) {
     const icon = getFileIcon(path.extname(files[i]));
     console.log(`  ${c.gray}${i + 1}.${c.reset} ${icon} ${c.cyan}${files[i]}${c.reset}`);
   }
-  
+
   console.log();
   const answer = (await rl.question(`${c.yellow}Allow?${c.reset} ${c.dim}(y/n/select)${c.reset}: `)).trim().toLowerCase();
-  
+
   if (answer === "y" || answer === "yes") return files;
   if (answer === "n" || answer === "no") return [];
   if (answer === "s" || answer === "select") {
     console.log(`${c.dim}Enter numbers (e.g., "1 3 5" or "1-3"):${c.reset}`);
     const selection = (await rl.question(`${c.cyan}Selection:${c.reset} `)).trim();
-    
+
     const selected = [];
     const parts = selection.split(/[\s,]+/);
-    
+
     for (const part of parts) {
       if (part.includes("-")) {
         const [start, end] = part.split("-").map(n => parseInt(n.trim()));
@@ -554,10 +682,10 @@ async function requestFilePermission(files, rl) {
         if (num >= 1 && num <= files.length) selected.push(files[num - 1]);
       }
     }
-    
+
     return [...new Set(selected)];
   }
-  
+
   return [];
 }
 
@@ -582,11 +710,11 @@ async function reviewCode(file) {
   const content = await readFileQuietly(file);
   const sys = "You are a senior code reviewer. Analyze for: bugs, performance issues, security vulnerabilities, best practices, and improvements. Provide a structured review.";
   const user = `Review:\n\nFile: ${file}\n\n${content}`;
-  
+
   startSpinner("Reviewing code");
   const { text } = await pplx([{ role: "system", content: sys }, { role: "user", content: user }]);
   stopSpinner();
-  
+
   console.log(`\n${c.bold}${c.brightMagenta}🔍 Code Review: ${file}${c.reset}\n`);
   console.log(formatResponse(text));
   console.log();
@@ -598,14 +726,14 @@ async function generateTests(file) {
   let framework = "Jest";
   if (projectType === "python") framework = "pytest";
   if (projectType === "java" || projectType === "android") framework = "JUnit";
-  
+
   const sys = `Generate comprehensive unit tests using ${framework}. Include setup/teardown, positive/negative cases, edge cases, mocks. Return ONLY test code.`;
   const user = `Generate tests:\n\n${content}`;
-  
+
   startSpinner("Generating tests");
   const { text } = await pplx([{ role: "system", content: sys }, { role: "user", content: user }], { temperature: 0.2 });
   stopSpinner();
-  
+
   return text;
 }
 
@@ -613,11 +741,11 @@ async function generateDocs(file) {
   const content = await readFileQuietly(file);
   const sys = "Generate comprehensive documentation with: overview, functions/classes, parameters, usage examples, return values. Return ONLY documented code.";
   const user = `Document:\n\n${content}`;
-  
+
   startSpinner("Generating docs");
   const { text } = await pplx([{ role: "system", content: sys }, { role: "user", content: user }], { temperature: 0.3 });
   stopSpinner();
-  
+
   return text;
 }
 
@@ -626,20 +754,20 @@ async function generateCommitMessage() {
     console.log(`${c.red}✗${c.reset} Not a git repository\n`);
     return;
   }
-  
+
   const diff = getGitDiff();
   if (!diff) {
     console.log(`${c.yellow}⚠${c.reset} No changes to commit\n`);
     return;
   }
-  
+
   const sys = "Generate a concise conventional commit message. Format: <type>(<scope>): <description>. Types: feat, fix, docs, style, refactor, test, chore. Keep under 72 chars.";
   const user = `Generate commit message:\n\n${diff.slice(0, 3000)}`;
-  
+
   startSpinner("Generating commit");
   const { text } = await pplx([{ role: "system", content: sys }, { role: "user", content: user }], { temperature: 0.3 });
   stopSpinner();
-  
+
   console.log(`\n${c.bold}${c.brightCyan}📝 Suggested Commit:${c.reset}\n`);
   console.log(`${c.green}${text.trim()}${c.reset}\n`);
 }
@@ -647,12 +775,12 @@ async function generateCommitMessage() {
 async function codeMetrics(file) {
   const content = await readFileQuietly(file);
   const lines = content.split('\n');
-  
+
   const totalLines = lines.length;
   const codeLines = lines.filter(l => l.trim() && !l.trim().startsWith('//')).length;
   const commentLines = lines.filter(l => l.trim().startsWith('//')).length;
   const blankLines = lines.filter(l => !l.trim()).length;
-  
+
   console.log(`\n${c.bold}${c.brightCyan}📊 Code Metrics: ${file}${c.reset}\n`);
   console.log(`${c.dim}Total Lines:${c.reset}    ${c.yellow}${totalLines}${c.reset}`);
   console.log(`${c.dim}Code Lines:${c.reset}     ${c.green}${codeLines}${c.reset}`);
@@ -665,7 +793,7 @@ async function scaffold(type, name) {
   const projectType = await analyzeProject();
   let template = "";
   let filename = "";
-  
+
   if (projectType === "android" && type === "activity") {
     filename = `${name}Activity.kt`;
     template = `package com.example.app\n\nimport android.os.Bundle\nimport androidx.appcompat.app.AppCompatActivity\n\nclass ${name}Activity : AppCompatActivity() {\n    override fun onCreate(savedInstanceState: Bundle?) {\n        super.onCreate(savedInstanceState)\n        // TODO: Set content view\n    }\n}`;
@@ -675,19 +803,19 @@ async function scaffold(type, name) {
   } else {
     const sys = `Generate a ${type} template named ${name} for ${projectType}. Return ONLY code.`;
     const user = `Create ${type}: ${name}`;
-    
+
     startSpinner("Generating");
     const { text } = await pplx([{ role: "system", content: sys }, { role: "user", content: user }]);
     stopSpinner();
-    
+
     template = text;
     filename = `${name}.${projectType === 'python' ? 'py' : projectType === 'java' ? 'java' : 'js'}`;
   }
-  
+
   console.log(`\n${c.bold}${c.yellow}━━ ${filename} ━━${c.reset}\n`);
   console.log(template);
   console.log(`\n${c.bold}${c.yellow}━━━━━━━━━━━━${c.reset}\n`);
-  
+
   return { filename, content: template };
 }
 
@@ -695,28 +823,28 @@ async function scaffold(type, name) {
 async function saveSession(name) {
   await fs.mkdir(SESSION_DIR, { recursive: true });
   const sessionFile = path.join(SESSION_DIR, `${name}.json`);
-  
+
   const session = {
     timestamp: new Date().toISOString(),
     root: ROOT,
     history: conversationHistory,
     settings: settings
   };
-  
+
   await fs.writeFile(sessionFile, JSON.stringify(session, null, 2), "utf8");
   console.log(`${c.green}✓${c.reset} Session saved: ${c.cyan}${name}${c.reset}\n`);
 }
 
 async function loadSession(name) {
   const sessionFile = path.join(SESSION_DIR, `${name}.json`);
-  
+
   try {
     const data = await fs.readFile(sessionFile, "utf8");
     const session = JSON.parse(data);
-    
+
     conversationHistory = session.history || [];
     ROOT = session.root || ROOT;
-    
+
     console.log(`${c.green}✓${c.reset} Loaded: ${c.cyan}${name}${c.reset}`);
     console.log(`${c.dim}Time: ${new Date(session.timestamp).toLocaleString()}${c.reset}`);
     console.log(`${c.dim}Messages: ${conversationHistory.length}${c.reset}\n`);
@@ -729,14 +857,14 @@ async function listSessions() {
   try {
     await fs.mkdir(SESSION_DIR, { recursive: true });
     const files = await fs.readdir(SESSION_DIR);
-    
+
     if (files.length === 0) {
       console.log(`${c.yellow}⚠${c.reset} No saved sessions\n`);
       return;
     }
-    
+
     console.log(`${c.bold}${c.brightCyan}💾 Saved Sessions${c.reset}\n`);
-    
+
     for (const file of files) {
       if (file.endsWith('.json')) {
         const data = await fs.readFile(path.join(SESSION_DIR, file), "utf8");
@@ -773,7 +901,7 @@ async function listSnippets() {
     console.log(`${c.yellow}⚠${c.reset} No saved snippets\n`);
     return;
   }
-  
+
   console.log(`${c.bold}${c.brightCyan}✂️  Code Snippets${c.reset}\n`);
   for (const name of names) {
     const snippet = snippetsLibrary[name];
@@ -790,7 +918,7 @@ function suggestNextAction(cmd) {
     'edit': ['read', 'test'],
     'review': ['refactor', 'edit'],
   };
-  
+
   const cmds = suggestions[cmd] || [];
   if (cmds.length > 0 && settings.autoSuggest) {
     console.log(`${c.dim}💡 Try: ${cmds.map(c => `${c.cyan}${c}${c.reset}`).join(', ')}${c.reset}\n`);
@@ -799,18 +927,18 @@ function suggestNextAction(cmd) {
 
 async function handleAsk(prompt, rl) {
   conversationHistory.push({ role: "user", content: prompt });
-  
+
   if (conversationHistory.length > settings.maxHistory * 2) {
     conversationHistory = conversationHistory.slice(-settings.maxHistory * 2);
   }
-  
+
   startSpinner("Analyzing query");
   const relevantFiles = await discoverRelevantFiles(prompt);
   stopSpinner();
-  
+
   let allowedFiles = [];
   let filesContext = "";
-  
+
   if (relevantFiles.length > 0) {
     if (settings.askPermission) {
       allowedFiles = await requestFilePermission(relevantFiles, rl);
@@ -818,10 +946,10 @@ async function handleAsk(prompt, rl) {
       allowedFiles = relevantFiles;
       console.log(`\n${c.dim}Reading ${allowedFiles.length} file(s)...${c.reset}\n`);
     }
-    
+
     if (allowedFiles.length > 0) {
       console.log(`${c.green}✓${c.reset} Reading files...\n`);
-      
+
       for (const file of allowedFiles) {
         try {
           const content = await readFileQuietly(file);
@@ -836,27 +964,164 @@ async function handleAsk(prompt, rl) {
     } else {
       console.log(`${c.yellow}⚠${c.reset} No files read. Using general knowledge...\n`);
     }
+
+    // Smart Import Tracing
+    if (settings.deepAnalysis && allowedFiles.length > 0) {
+      startSpinner("Tracing imports");
+      const traced = await traceImports(allowedFiles); // New function
+      if (traced.length > 0) {
+        console.log(`${c.dim}  + Traced ${traced.length} dependency file(s)${c.reset}`);
+        for (const t of traced) {
+          filesContext += `\n\n=== [TRACED] ${t.file} ===\n(First 50 lines preview)\n${t.content}\n`;
+        }
+      }
+      stopSpinner();
+    }
   }
-  
+
+
+
   const messages = [];
-  const systemPrompt = filesContext 
-    ? `You are a helpful AI assistant. Here are relevant files:\n${filesContext}\n\nProvide detailed, accurate answers based on the actual code.`
-    : "You are a helpful AI assistant. Provide clear, concise answers.";
-  
+  const brainContext = projectBrain.description || projectBrain.architecture
+    ? `\n\n=== PROJECT BRAIN ===\n${JSON.stringify(projectBrain, null, 2)}\n`
+    : "";
+
+  const systemPrompt = filesContext
+    ? `You are a helpful AI assistant. Use the project brain and files below:\n${brainContext}\n${filesContext}\n\nProvide detailed, accurate answers based on the actual code.`
+    : `You are a helpful AI assistant. Use this project context:\n${brainContext}\nProvide clear, concise answers.`;
+
   messages.push({ role: "system", content: systemPrompt });
+
+  // Role/Persona
+  if (settings.role) {
+    messages.push({ role: "system", content: `IMPORTANT: Adopt the persona of: ${settings.role}` });
+  }
+
   messages.push(...conversationHistory);
-  
+
+  // Semantic Routing
+  let effectiveModel = MODEL;
+  const suggestedModel = classifyQuery(prompt);
+  if (suggestedModel && settings.model !== suggestedModel && settings.smartContext) {
+    effectiveModel = suggestedModel;
+    console.log(`${c.dim}🧠 Smart Route: Switching to ${c.magenta}${effectiveModel}${c.reset}${c.dim} for complex task${c.reset}`);
+  }
+
   startSpinner("Thinking");
-  const { text } = await pplx(messages);
+  const { text } = await pplx(messages, { model: effectiveModel });
   stopSpinner();
-  
+
   conversationHistory.push({ role: "assistant", content: text });
-  
+
   console.log(`${c.bold}${c.brightMagenta}◈ AI Response:${c.reset}\n`);
   console.log(formatResponse(text));
   console.log();
-  
+
   suggestNextAction("ask");
+}
+
+async function handleAutoMode(goal, rl) {
+  console.log(`\n${c.bold}${c.brightMagenta}🤖 Autonomous Agent Started${c.reset}\n${c.dim}Goal:${c.reset} ${c.yellow}${goal}${c.reset}\n`);
+
+  const maxSteps = 15;
+  let steps = 0;
+  let context = "";
+  let lastResult = "(Started)";
+
+  while (steps < maxSteps) {
+    steps++;
+    console.log(`${c.bold}${c.blue}Step ${steps}/${maxSteps}${c.reset}`);
+
+    // 1. Think
+    startSpinner("Thinking");
+    const sys = `You are an autonomous developer agent. 
+Goal: "${goal}"
+Project: ${ROOT}
+Recent Output: ${lastResult}
+
+Decide the next step. You can:
+1. run <command>: execute shell command
+2. edit <file> <instruction>: edit a file
+3. read <file>: read file content
+4. create <file> <content>: create new file
+5. done: task completed
+
+Return ONLY a JSON object: { "action": "run|edit|read|create|done", "target": "string", "content": "string" }`;
+
+    const msgs = [{ role: "system", content: sys }];
+    if (context) msgs.push({ role: "user", content: `Context:\n${context}` });
+
+    let plan = null;
+    try {
+      const { text } = await pplx(msgs, { temperature: 0.1, model: "sonar-reasoning" });
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (jsonMatch) plan = JSON.parse(jsonMatch[0]);
+    } catch (e) {
+      console.log(`${c.red}Failed to plan: ${e.message}${c.reset}`);
+    }
+    stopSpinner();
+
+    if (!plan) {
+      console.log(`${c.red}Could not determine next step.${c.reset}`);
+      break;
+    }
+
+    console.log(`${c.dim}Action:${c.reset} ${c.cyan}${plan.action}${c.reset} ${c.yellow}${plan.target || ""}${c.reset}\n`);
+
+    // 2. Act
+    try {
+      if (plan.action === "done") {
+        console.log(`${c.green}✓ Task Completed${c.reset}\n`);
+        break;
+      }
+
+      if (plan.action === "run") {
+        const confirm = (await rl.question(`${c.yellow}Run "${plan.target}"?${c.reset} (y/n): `)).trim();
+        if (confirm === "y" || confirm === "yes") {
+          try {
+            const out = execSync(plan.target, { cwd: ROOT, encoding: "utf8", stdio: "pipe" });
+            console.log(out);
+            lastResult = `Command output:\n${out.slice(0, 1000)}`;
+          } catch (e) {
+            console.log(`${c.red}Command failed:${c.reset} ${e.message}`);
+            lastResult = `Command failed: ${e.message}\nStderr: ${e.stderr?.toString()}`;
+          }
+        } else {
+          lastResult = "User skipped command.";
+        }
+      }
+      else if (plan.action === "read") {
+        const content = await readFileQuietly(plan.target);
+        context += `\nFile ${plan.target}:\n${content}\n`;
+        lastResult = `Read ${plan.target} (${content.length} chars)`;
+      }
+      else if (plan.action === "edit") {
+        // Reuse edit logic
+        const original = await readFileQuietly(plan.target);
+        const editSys = "You are a code editor. Return ONLY updated file content.";
+        const editUser = `File: ${plan.target}\nInstruction: ${plan.content}\nCurrent:\n${original}`;
+
+        startSpinner("Editing");
+        const { text } = await pplx([{ role: "system", content: editSys }, { role: "user", content: editUser }], { temperature: 0.1 });
+        stopSpinner();
+
+        const confirm = (await rl.question(`${c.yellow}Apply edit to ${plan.target}?${c.reset} (y/n): `)).trim();
+        if (confirm === "y" || confirm === "yes") {
+          await writeFile(plan.target, text);
+          lastResult = `Edited ${plan.target}`;
+        } else {
+          lastResult = "User skipped edit.";
+        }
+      }
+      else if (plan.action === "create") {
+        await writeFile(plan.target, plan.content);
+        lastResult = `Created ${plan.target}`;
+      }
+    } catch (e) {
+      lastResult = `Error: ${e.message}`;
+      console.log(`${c.red}Action Error:${c.reset} ${e.message}`);
+    }
+  }
 }
 
 function showHistory() {
@@ -864,9 +1129,9 @@ function showHistory() {
     console.log(`${c.yellow}⚠${c.reset} No conversation history\n`);
     return;
   }
-  
+
   console.log(`${c.bold}${c.brightCyan}📜 History${c.reset}${c.dim} · ${conversationHistory.length} messages${c.reset}\n`);
-  
+
   for (let i = 0; i < conversationHistory.length; i++) {
     const msg = conversationHistory[i];
     const icon = msg.role === "user" ? "👤" : "🤖";
@@ -879,7 +1144,7 @@ function showHistory() {
 
 async function showSettings() {
   const bool = (val) => val ? c.green + "✓" : c.red + "✗";
-  
+
   console.log(`
 ${c.bold}${c.brightCyan}⚙️  Configuration${c.reset}
 
@@ -946,6 +1211,7 @@ ${c.bold}${c.brightCyan}📍 Root:${c.reset} ${c.yellow}${path.basename(ROOT)}${
 
 ${c.bold}${c.brightMagenta}━━ 💬 AI Chat ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}
   ${c.cyan}ask${c.reset} ${c.dim}<prompt>${c.reset}              Chat with AI (reads code!)
+  ${c.cyan}role${c.reset} ${c.dim}<persona>${c.reset}             Set AI persona
   ${c.cyan}clear${c.reset}                       Clear conversation
   ${c.cyan}history${c.reset}                     Show chat history
   
@@ -968,6 +1234,8 @@ ${c.bold}${c.brightYellow}━━ 🔧 Dev Tools ━━━━━━━━━━�
   ${c.cyan}review${c.reset} ${c.dim}<file>${c.reset}              AI code review
   ${c.cyan}test${c.reset} ${c.dim}<file>${c.reset}                Generate tests
   ${c.cyan}document${c.reset} ${c.dim}<file>${c.reset}            Generate docs
+  ${c.cyan}docs${c.reset} ${c.dim}<query>${c.reset}               Fetch external docs
+  ${c.cyan}health${c.reset}                      Check project health
   ${c.cyan}refactor${c.reset} ${c.dim}<file>${c.reset}            AI refactoring
   ${c.cyan}metrics${c.reset} ${c.dim}<file>${c.reset}             Code metrics
   ${c.cyan}scaffold${c.reset} ${c.dim}<type> <n>${c.reset}        Generate component
@@ -986,6 +1254,16 @@ ${c.bold}${c.brightCyan}━━ 💾 Sessions & Snippets ━━━━━━━━
   ${c.cyan}snippet get${c.reset} ${c.dim}<name>${c.reset}         Get snippet
   ${c.cyan}snippet list${c.reset}                List snippets
   
+${c.bold}${c.brightMagenta}━━ 🧠 Project Brain ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}
+  ${c.cyan}brain init${c.reset}                  Initialize/Reset brain
+  ${c.cyan}brain update${c.reset}                Auto-update brain
+  ${c.cyan}brain show${c.reset}                  Show brain status
+
+${c.bold}${c.red}━━ 🤖 Autonomous ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}
+  ${c.cyan}auto${c.reset} ${c.dim}<goal>${c.reset}                 Start autonomous agent loop
+  ${c.cyan}do${c.reset} ${c.dim}<instruction>${c.reset}           Run NL shell command
+  ${c.cyan}fix${c.reset}                          Auto-fix last error
+
 ${c.bold}${c.yellow}━━ ⚙️  System ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}
   ${c.cyan}settings${c.reset}                    View config
   ${c.cyan}settings set${c.reset} ${c.dim}<k> <v>${c.reset}       Update setting
@@ -1038,7 +1316,7 @@ ${c.dim}Type${c.reset} ${c.cyan}help${c.reset} ${c.dim}for commands or${c.reset}
     }
 
     const [cmd, ...rest] = line.split(" ");
-    
+
     // Conversational mode: treat non-commands as "ask"
     if (settings.conversationalMode && ![
       "quit", "exit", "help", "ask", "clear", "history", "settings",
@@ -1050,9 +1328,9 @@ ${c.dim}Type${c.reset} ${c.cyan}help${c.reset} ${c.dim}for commands or${c.reset}
       await handleAsk(line, rl);
       continue;
     }
-    
+
     lastCommand = cmd;
-    
+
     try {
       if (cmd === "quit" || cmd === "exit") {
         console.log(`\n${c.brightCyan}👋 Thanks for using Perplexity CLI Agent!${c.reset}\n`);
@@ -1078,7 +1356,7 @@ ${c.dim}Type${c.reset} ${c.cyan}help${c.reset} ${c.dim}for commands or${c.reset}
           const key = rest[1];
           const value = rest.slice(2).join(" ");
           const boolVal = value.toLowerCase() === "true";
-          
+
           if (key === "model") {
             settings.model = value;
             MODEL = value;
@@ -1137,7 +1415,7 @@ ${c.dim}Type${c.reset} ${c.cyan}help${c.reset} ${c.dim}for commands or${c.reset}
             console.log(`${c.red}✗${c.reset} Unknown setting: ${c.yellow}${key}${c.reset}\n`);
             continue;
           }
-          
+
           await saveSettings();
           if (key !== "conversationalMode") {
             console.log(`${c.green}✓${c.reset} ${c.cyan}${key}${c.reset} = ${c.yellow}${value}${c.reset}\n`);
@@ -1239,7 +1517,7 @@ ${c.dim}Type${c.reset} ${c.cyan}help${c.reset} ${c.dim}for commands or${c.reset}
         const { text } = await pplx([{ role: "system", content: sys }, { role: "user", content: user }], { temperature: settings.editTemp });
         stopSpinner();
         console.log(`\n${c.bold}${c.yellow}━━ Proposed Changes ━━${c.reset}\n`);
-        console.log(text.slice(0, 500) + (text.length > 500 ? "\n..." : ""));
+        showDiff(original, text);
         console.log(`\n${c.bold}${c.yellow}━━━━━━━━━━━━━━━━━━${c.reset}\n`);
         const confirm = (await rl.question(`${c.cyan}Save?${c.reset} ${c.dim}(y/n)${c.reset}: `)).trim().toLowerCase();
         if (confirm === "y" || confirm === "yes") {
@@ -1387,11 +1665,168 @@ ${c.dim}Type${c.reset} ${c.cyan}help${c.reset} ${c.dim}for commands or${c.reset}
           console.log(`${c.yellow}⚠${c.reset} Usage: ${c.cyan}snippet save/get/list <name>${c.reset}\n`);
         }
       }
+
+      else if (cmd === "auto") {
+        const goal = rest.join(" ");
+        if (!goal) {
+          console.log(`${c.yellow}⚠${c.reset} Usage: ${c.cyan}auto${c.reset} ${c.dim}<goal>${c.reset}\n`);
+          continue;
+        }
+        await handleAutoMode(goal, rl);
+      }
+      else if (cmd === "fix") {
+        if (!lastError) {
+          console.log(`${c.yellow}⚠${c.reset} No recent errors to fix\n`);
+          continue;
+        }
+        console.log(`${c.bold}${c.brightMagenta}🔧 Analyzing Error...${c.reset}\n`);
+        const sys = "You are an expert debugger. Analyze the error and provide a fix. If it's a command, provide the corrected command. If code, provide the code fix.";
+        const user = `Error: ${lastError.message}\nStack: ${lastError.stack}\nContext: last command was "${lastCommand}"`;
+
+        startSpinner("Diagnosing");
+        const { text } = await pplx([{ role: "system", content: sys }, { role: "user", content: user }], { model: "sonar-reasoning" });
+        stopSpinner();
+
+        console.log(`\n${c.bold}${c.cyan}Suggested Fix:${c.reset}\n${formatResponse(text)}\n`);
+      }
+      else if (cmd === "do") {
+        const intent = rest.join(" ");
+        if (!intent) {
+          console.log(`${c.yellow}⚠${c.reset} Usage: ${c.cyan}do${c.reset} ${c.dim}<action>${c.reset}\n`);
+          continue;
+        }
+
+        const sys = "You are a shell command generator. specific to Windows PowerShell/cmd or Linux based on context. Return ONLY the command, no markdown.";
+        const user = `Project: ${projectBrain.description}\nOS: ${process.platform}\nIntent: ${intent}`;
+
+        startSpinner("Generating command");
+        const { text } = await pplx([{ role: "system", content: sys }, { role: "user", content: user }]);
+        stopSpinner();
+
+        const command = text.trim().replace(/`/g, "");
+        console.log(`\n${c.bold}${c.yellow}>> ${command}${c.reset}\n`);
+
+        const confirm = (await rl.question(`${c.cyan}Execute?${c.reset} ${c.dim}(y/n)${c.reset}: `)).trim().toLowerCase();
+        if (confirm === "y" || confirm === "yes") {
+          try {
+            execSync(command, { cwd: ROOT, stdio: "inherit" });
+            console.log(`${c.green}✓${c.reset} Done\n`);
+          } catch (e) {
+            lastError = e;
+            console.log(`${c.red}✗ Command failed${c.reset}\n`);
+          }
+        }
+      }
+      else if (cmd === "role") {
+        const role = rest.join(" ");
+        if (!role) {
+          console.log(`\n${c.bold}${c.brightMagenta}🎭 Current Role:${c.reset} ${settings.role || "(Default AI)"}\n`);
+          const presets = ["Architect", "Code Reviewer", "Security Auditor", "Tech Lead", "Junior Dev"];
+          console.log(`${c.dim}Presets: ${presets.join(", ")}${c.reset}\n`);
+        } else {
+          if (role === "clear" || role === "reset") settings.role = "";
+          else settings.role = role;
+          await saveSettings();
+          console.log(`${c.green}✓${c.reset} Role set to: ${c.magenta}${settings.role || "Default"}${c.reset}\n`);
+        }
+      }
+      else if (cmd === "docs") {
+        const query = rest.join(" ");
+        if (!query) {
+          console.log(`${c.yellow}⚠${c.reset} Usage: ${c.cyan}docs${c.reset} ${c.dim}<library/topic>${c.reset}\n`);
+          continue;
+        }
+        startSpinner(`Searching docs for ${query}`);
+        const sys = "You are a documentation search assistant. Provide top-level summary, installation, and usage examples.";
+        const { text } = await pplx([{ role: "system", content: sys }, { role: "user", content: `Find docs for: ${query}` }], { model: "sonar" });
+        stopSpinner();
+        console.log(`\n${c.bold}${c.brightBlue}📚 Documentation: ${query}${c.reset}\n`);
+        console.log(formatResponse(text));
+        console.log();
+      }
+      else if (cmd === "health") {
+        startSpinner("Analyzing Project Health");
+        const files = await collectProjectFiles(3);
+        let report = "";
+        let issues = 0;
+
+        const analysis = await Promise.all(files.slice(0, 20).map(async f => {
+          const content = await readFileQuietly(f);
+          const todos = (content.match(/TODO|FIXME/g) || []).length;
+          const size = content.length;
+          return { f, todos, size };
+        }));
+
+        stopSpinner();
+        console.log(`\n${c.bold}${c.green}🏥 Project Health Report${c.reset}\n`);
+
+        analysis.sort((a, b) => b.todos - a.todos).filter(r => r.todos > 0).forEach(r => {
+          console.log(`  ${c.yellow}⚠${c.reset} ${c.cyan}${r.f}${c.reset}: ${c.yellow}${r.todos} TODOs${c.reset}`);
+          issues += r.todos;
+        });
+
+        const large = analysis.filter(r => r.size > 10000); // 10KB+
+        if (large.length > 0) {
+          console.log(`\n  ${c.red}⚡ High Complexity (Large Files):${c.reset}`);
+          large.forEach(r => console.log(`    ${c.dim}${r.f} (${Math.round(r.size / 1024)}KB)${c.reset}`));
+        }
+
+        if (issues === 0 && large.length === 0) console.log(`  ${c.green}✓ No obvious issues found${c.reset}`);
+        console.log();
+      }
+      else if (cmd === "brain") {
+        if (rest[0] === "init") {
+          projectBrain = {
+            name: path.basename(ROOT),
+            description: "A Node.js CLI Agent",
+            architecture: "Monolithic script",
+            conventions: "ES Modules, Async/Await",
+            importantFiles: ["agent.mjs"],
+            lastUpdated: new Date().toISOString()
+          };
+          await saveBrain();
+          console.log(`${c.green}✓${c.reset} Brain initialized. Edit .pplx-brain.json to add details.\n`);
+        } else if (rest[0] === "show") {
+          console.log(`\n${c.bold}${c.brightMagenta}🧠 Project Brain${c.reset}\n`);
+          console.log(JSON.stringify(projectBrain, null, 2));
+          console.log();
+        } else if (rest[0] === "update") {
+          startSpinner("Updating Brain");
+          // Simple auto-update: just refresh file list
+          const files = await collectProjectFiles(2);
+          projectBrain.importantFiles = files.slice(0, 10);
+
+          // Ask AI to summarize project
+          const sys = "Analyze this project structure and package.json. Return a JSON object with keys: description, architecture, conventions.";
+          const pkg = await readFileQuietly("package.json").catch(() => "");
+          const fileList = files.join("\n");
+          const user = `Context:\n${pkg}\n\nFiles:\n${fileList}`;
+
+          try {
+            const { text } = await pplx([{ role: "system", content: sys }, { role: "user", content: user }]);
+            try {
+              // Try to parse JSON from AI
+              const jsonStr = text.match(/\{[\s\S]*\}/)?.[0] || "{}";
+              const analysis = JSON.parse(jsonStr);
+              projectBrain = { ...projectBrain, ...analysis, lastUpdated: new Date().toISOString() };
+            } catch (e) {
+              console.log(`${c.yellow}⚠ Could not parse AI analysis${c.reset}`);
+            }
+          } catch (e) { }
+
+          await saveBrain();
+          stopSpinner();
+          console.log(`${c.green}✓${c.reset} Brain updated\n`);
+        } else {
+          console.log(`${c.yellow}⚠${c.reset} Usage: ${c.cyan}brain init/show/update${c.reset}\n`);
+        }
+      }
       else {
         console.log(`${c.red}✗${c.reset} Unknown: ${c.yellow}${cmd}${c.reset}`);
         console.log(`${c.dim}Try${c.reset} ${c.cyan}help${c.reset}\n`);
       }
     } catch (e) {
+      lastError = e;
       console.error(`${c.red}✗ Error:${c.reset} ${e?.message ?? String(e)}\n`);
     }
   }

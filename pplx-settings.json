@@ -6,5 +6,5 @@
   "autoContext": true,
   "syntax": true,
   "askPermission": true,
-  "conversationalMode": false
+  "conversationalMode": true
 }
