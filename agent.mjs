@@ -598,12 +598,29 @@ function isConversationalQuery(query) {
   if (/^(ok|cool|nice|thanks|alright)\s+(bro|man|dude|mate)/i.test(queryLower)) {
     return true;
   }
-
   return false;
 }
 
 async function discoverRelevantFiles(query) {
-  // Skip file discovery for conversational queries
+  // Explicit @filename handling
+  const matches = (query.match(/@([\w.\-\/]+)(?:\b|$)/g) || [])
+    .map(m => m.slice(1)) // remove @
+    .map(f => safePath(f));
+
+  const explicitFiles = [];
+  for (const f of matches) {
+    try {
+      const stats = await fs.stat(f);
+      if (stats.isFile()) explicitFiles.push(f);
+    } catch (e) { }
+  }
+
+  if (explicitFiles.length > 0) {
+    if (settings.verbose) console.log(`${c.dim}[Explicit file mention: ${explicitFiles.join(", ")}]${c.reset}`);
+    return explicitFiles;
+  }
+
+  // 2. Skip file discovery for conversational queries (only if no explicit files)
   if (settings.smartFileDetection && isConversationalQuery(query)) {
     return [];
   }
@@ -612,17 +629,6 @@ async function discoverRelevantFiles(query) {
   const allFiles = await collectProjectFiles(3);
   let relevantFiles = [];
   const queryLower = query.toLowerCase();
-
-  // Explicit @filename handling
-  const explicitFiles = (query.match(/@([\w.\-\/]+)(?:\b|$)/g) || [])
-    .map(m => m.slice(1)) // remove @
-    .map(f => safePath(f))
-    .filter(f => fs.existsSync(f) && fs.statSync(f).isFile());
-
-  if (explicitFiles.length > 0) {
-    if (settings.verbose) console.log(`${c.dim}[Explicit file mention: ${explicitFiles.join(", ")}]${c.reset}`);
-    relevantFiles = [...explicitFiles];
-  }
 
   // Check if query needs files at all
   const needsFiles = [
